@@ -27,7 +27,7 @@ FROM scratch AS node-artifacts
 COPY --from=node-build /out/ /
 
 FROM alpine:3.22
-RUN apk add --no-cache ca-certificates
+RUN apk add --no-cache ca-certificates openssl
 COPY --from=panel /out/hopx-panel /usr/local/bin/hopx-panel
 COPY scripts/node-install.sh scripts/node-runner.sh /usr/local/share/hopx/
 USER 65532:65532

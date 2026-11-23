@@ -78,15 +78,25 @@ build_panel() {
   docker build -t "$1" --build-arg "HOPX_VERSION=$2" "$3"
 }
 
+release_openssl() {
+  local image=$1 directory=$2
+  shift 2
+  docker run --rm --network none --cap-drop ALL --security-opt no-new-privileges \
+    --user "$(id -u):$(id -g)" --mount "type=bind,src=$directory,dst=/signing,readonly" \
+    --workdir /signing --entrypoint /usr/bin/openssl "$image" "$@" </dev/null
+}
+
 make_release() (
   local image=$1 version=$2 destination=$3 source=${4:-} existing=${5:-}
-  local container='' build_dir='' arch bin digest signature first=1
+  local container='' build_dir='' signing_dir arch bin digest signature first=1
   local artifacts="$workdir/releases/$version"
+  signing_dir=$(mktemp -d)
   trap 'if [[ -n $container ]]; then docker rm "$container" >/dev/null 2>&1 || true; fi
         if [[ -n $build_dir ]]; then
           rm -f -- "$build_dir/hopx-node-linux-amd64" "$build_dir/hopx-node-linux-arm64"
           rmdir -- "$build_dir"
-        fi' EXIT
+        fi
+        rm -rf -- "$signing_dir"' EXIT
   mkdir -p "$artifacts"
   chmod 0755 "$workdir/releases" "$artifacts"
   if [[ -n $source ]]; then
@@ -108,19 +118,29 @@ make_release() (
     docker cp "$container:/usr/local/share/hopx/$bin" "$workdir/releases/$bin"
     chmod 0644 "$workdir/releases/$bin"
   done
-  if [[ ! -f $workdir/keys/release.pem ]]; then
-    openssl genpkey -algorithm ED25519 -out "$workdir/keys/release.pem"
+  # Older installed images can still be used to restore an existing backup.
+  local -a signer=(release_openssl "$image" "$signing_dir")
+  if [[ -z $source ]] && ! "${signer[@]}" version >/dev/null 2>&1; then
+    signer=(openssl)
+  fi
+  if [[ -f $workdir/keys/release.pem ]]; then
+    cp -- "$workdir/keys/release.pem" "$signing_dir/release.pem"
+  else
+    (cd -- "$signing_dir" && "${signer[@]}" genpkey -algorithm ED25519) > "$signing_dir/release.pem" ||
+      die '无法生成节点发行签名密钥'
+    install -m 0600 -- "$signing_dir/release.pem" "$workdir/keys/release.pem"
   fi
   chmod 0600 "$workdir/keys/release.pem"
-  openssl pkey -in "$workdir/keys/release.pem" -pubout -out "$workdir/releases/release.pem"
+  (cd -- "$signing_dir" && "${signer[@]}" pkey -in release.pem -pubout) > "$workdir/releases/release.pem" ||
+    die '无法导出节点发行签名公钥'
   chmod 0644 "$workdir/releases/release.pem"
-  local message="$workdir/keys/release-message"
   {
     printf '{'
     for arch in amd64 arm64; do
       digest=$(hash_file "$artifacts/node-$arch")
-      printf '%s\nlinux-%s\n%s\n' "$version" "$arch" "$digest" > "$message"
-      signature=$(openssl pkeyutl -sign -inkey "$workdir/keys/release.pem" -rawin -in "$message" | openssl base64 -A)
+      printf '%s\nlinux-%s\n%s\n' "$version" "$arch" "$digest" > "$signing_dir/message"
+      signature=$(cd -- "$signing_dir" && "${signer[@]}" pkeyutl -sign -inkey release.pem -rawin -in message | openssl base64 -A) ||
+        die '无法签署节点发行包'
       printf '%s\n%s\n%s\n%s\n' "$version" "/releases/$version/node-$arch" "$digest" "$signature" > "$artifacts/install-$arch.txt"
       chmod 0644 "$artifacts/install-$arch.txt"
       (( first == 1 )) || printf ','
@@ -130,7 +150,6 @@ make_release() (
     done
     printf '}\n'
   } > "$destination"
-  rm -f -- "$message"
   chmod 0644 "$destination"
 )
 publish_bootstrap() {
