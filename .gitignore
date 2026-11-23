@@ -1,0 +1,12 @@
+/bin/
+/data/
+/web/dist/
+/web/node_modules/
+/[Pp][Ll][Aa][Nn].[Mm][Dd]
+/.env
+*.sql
+!/internal/panel/schema.sql
+*.sql.gz
+*.db
+*.db-*
+*.hopx

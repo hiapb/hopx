@@ -1,0 +1,12 @@
+.git
+.env
+bin
+data
+web/node_modules
+web/dist
+**/*.sql
+!internal/panel/schema.sql
+**/*.sql.gz
+**/*.db
+**/*.db-*
+**/*.hopx

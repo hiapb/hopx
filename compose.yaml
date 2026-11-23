@@ -1,0 +1,22 @@
+services:
+  hopx:
+    image: ${HOPX_IMAGE:-hopx:local}
+    restart: unless-stopped
+    user: "${HOPX_UID:-65532}:${HOPX_GID:-65532}"
+    cap_drop: [ALL]
+    security_opt: [no-new-privileges:true]
+    environment:
+      HOPX_ADMIN: ${HOPX_ADMIN:-admin}
+      HOPX_PASSWORD: ${HOPX_PASSWORD:-}
+      HOPX_PUBLIC_URL: ${HOPX_PUBLIC_URL:-}
+      HOPX_PAYMENT_SECRET: ${HOPX_PAYMENT_SECRET:-}
+    ports:
+      - "${HOPX_HOST:-127.0.0.1}:${HOPX_PORT:-38471}:38471"
+    volumes:
+      - ./data:/data
+      - ./releases:/releases:ro
+    healthcheck:
+      test: ["CMD", "wget", "-q", "-T", "3", "-O", "/dev/null", "http://127.0.0.1:38471/healthz"]
+      interval: 5s
+      timeout: 4s
+      retries: 15
