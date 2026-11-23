@@ -54,6 +54,52 @@ func testRequest(t *testing.T, client *http.Client, method, url string, headers 
 	}
 }
 
+func TestBrowserLoginThroughReverseProxy(t *testing.T) {
+	panel, err := Open(Options{
+		Database:      filepath.Join(t.TempDir(), "proxy.db"),
+		AdminPassword: "test-password-123",
+		PublicURL:     "http://127.0.0.1:38571",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer panel.Close()
+	handler := panel.Handler()
+	for _, tc := range []struct {
+		name, origin, fetchSite string
+		status                  int
+		secure                  bool
+	}{
+		{"HTTPS proxy with rewritten Host", "https://panel.example.com", "same-origin", 200, true},
+		{"cross-site request", "https://other.example.com", "cross-site", 403, false},
+		{"same-site sibling", "https://other.example.com", "same-site", 403, false},
+		{"opaque origin", "null", "same-origin", 403, false},
+		{"local HTTP access", "http://127.0.0.1:38571", "", 200, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			req := httptest.NewRequest(http.MethodPost, "http://127.0.0.1:38571/api/login",
+				bytes.NewBufferString(`{"name":"admin","password":"test-password-123"}`))
+			req.Header.Set("Content-Type", "application/json")
+			req.Header.Set("Origin", tc.origin)
+			req.Header.Set("Sec-Fetch-Site", tc.fetchSite)
+			rec := httptest.NewRecorder()
+			handler.ServeHTTP(rec, req)
+			if rec.Code != tc.status {
+				t.Fatalf("login returned %d, want %d: %s", rec.Code, tc.status, rec.Body)
+			}
+			cookies := rec.Result().Cookies()
+			if tc.status == 200 {
+				if len(cookies) != 1 || cookies[0].Secure != tc.secure ||
+					!cookies[0].HttpOnly || cookies[0].SameSite != http.SameSiteStrictMode {
+					t.Fatal("unexpected login cookie attributes")
+				}
+			} else if len(cookies) != 0 {
+				t.Fatal("rejected login issued a cookie")
+			}
+		})
+	}
+}
+
 func TestNodeEnrollmentAndIdempotentAccounting(t *testing.T) {
 	panel, err := Open(Options{Database: filepath.Join(t.TempDir(), "test.db"), AdminPassword: "test-password-123", PaymentSecret: "test-secret"})
 	if err != nil {

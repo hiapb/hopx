@@ -193,6 +193,7 @@ install_service() (
   read -r -p '对外端口 [默认: 38571]: ' port
   port=${port:-38571}
   [[ $port =~ ^[1-9][0-9]{0,4}$ && $port -le 65535 ]] || die '端口无效'
+  say '使用 HTTPS 反代时，请填写浏览器访问的公网地址，例如 https://panel.example.com。'
   read -r -p "面板访问 URL [默认: http://127.0.0.1:$port]: " public
   public=${public:-http://127.0.0.1:$port}
   local url_pattern='^https?://([A-Za-z0-9._-]+|\[[A-Fa-f0-9:]+\])(:[0-9]{1,5})?$'

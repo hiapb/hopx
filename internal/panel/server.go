@@ -300,6 +300,10 @@ func (s *Server) setting(key, fallback string) string {
 
 func (s *Server) cookie(w http.ResponseWriter, r *http.Request, value string, age int) {
 	secure := r.TLS != nil || strings.HasPrefix(s.publicURL, "https://")
+	if !secure && r.Header.Get("Sec-Fetch-Site") == "same-origin" {
+		origin := browserOrigin(r.Header.Get("Origin"))
+		secure = origin != nil && origin.Scheme == "https"
+	}
 	http.SetCookie(w, &http.Cookie{Name: "hopx_session", Value: value, Path: "/", HttpOnly: true, Secure: secure, SameSite: http.SameSiteStrictMode, MaxAge: age})
 }
 
@@ -667,16 +671,22 @@ func (s *Server) Handler() http.Handler {
 }
 
 func (s *Server) browserWriteAllowed(r *http.Request) bool {
-	if r.Header.Get("Sec-Fetch-Site") == "cross-site" {
+	site := r.Header.Get("Sec-Fetch-Site")
+	if site == "cross-site" {
 		return false
 	}
 	header := r.Header.Get("Origin")
 	if header == "" {
 		return true
 	}
-	origin, err := url.Parse(header)
-	if err != nil || origin.User != nil || origin.Host == "" || origin.Path != "" || origin.RawQuery != "" || origin.Fragment != "" {
+	origin := browserOrigin(header)
+	if origin == nil {
 		return false
+	}
+	// Fetch Metadata describes the browser-facing origin even when a TLS
+	// reverse proxy changes the scheme or Host before forwarding the request.
+	if site == "same-origin" {
+		return true
 	}
 	if strings.EqualFold(header, strings.TrimRight(s.publicURL, "/")) {
 		return true
@@ -686,6 +696,16 @@ func (s *Server) browserWriteAllowed(r *http.Request) bool {
 		scheme = "https"
 	}
 	return origin.Scheme == scheme && strings.EqualFold(origin.Host, r.Host)
+}
+
+func browserOrigin(value string) *url.URL {
+	origin, err := url.Parse(value)
+	if err != nil || (origin.Scheme != "http" && origin.Scheme != "https") ||
+		origin.User != nil || origin.Hostname() == "" || origin.Path != "" ||
+		origin.ForceQuery || origin.RawQuery != "" || strings.Contains(value, "#") {
+		return nil
+	}
+	return origin
 }
 
 func (s *Server) Maintenance(ctx context.Context) {
