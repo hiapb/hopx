@@ -171,8 +171,8 @@ install_service() (
   path=${path:-$default_dir}
   [[ $path == /* && $path != / ]] || die '请使用有效的绝对路径'
   [[ ! -e $path/.env ]] || die '部署已存在，请使用 2 升级服务'
-  read -r -p '对外端口 [默认: 38471]: ' port
-  port=${port:-38471}
+  read -r -p '对外端口 [默认: 38571]: ' port
+  port=${port:-38571}
   [[ $port =~ ^[1-9][0-9]{0,4}$ && $port -le 65535 ]] || die '端口无效'
   read -r -p "面板访问 URL [默认: http://127.0.0.1:$port]: " public
   public=${public:-http://127.0.0.1:$port}
