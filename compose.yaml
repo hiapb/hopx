@@ -11,7 +11,7 @@ services:
       HOPX_PUBLIC_URL: ${HOPX_PUBLIC_URL:-}
       HOPX_PAYMENT_SECRET: ${HOPX_PAYMENT_SECRET:-}
     ports:
-      - "${HOPX_HOST:-127.0.0.1}:${HOPX_PORT:-38471}:38471"
+      - "${HOPX_HOST:-127.0.0.1}:${HOPX_PORT:-38571}:38471"
     volumes:
       - ./data:/data
       - ./releases:/releases:ro
