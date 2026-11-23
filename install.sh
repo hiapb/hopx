@@ -5,6 +5,7 @@ umask 077
 script_dir=$(cd -- "$(dirname -- "$0")" && pwd -P)
 state_file=${HOPX_DEPLOY_STATE:-${XDG_CONFIG_HOME:-$HOME/.config}/hopx/deployment-path}
 default_dir=${HOPX_INSTALL_PATH:-/opt/hopx}
+source_archive=https://codeload.github.com/hiapb/hopx/tar.gz/refs/heads/main
 
 say() { printf '%s\n' "$*"; }
 die() { say "$*" >&2; exit 1; }
@@ -36,13 +37,34 @@ initial_password() {
 getenv() { sed -n "s/^$1=//p" "$workdir/.env" | head -n 1; }
 hash_file() { openssl dgst -sha256 "$1" | awk '{print $NF}'; }
 
-source_directory() {
-  if [[ -f $script_dir/Dockerfile ]]; then
-    printf '%s\n' "$script_dir"
-  else
-    [[ -f $script_dir/source-path ]] || die '找不到 HopX 发布源码目录'
-    cat "$script_dir/source-path"
+load_source() {
+  local tmp_dir=$1 candidate=$script_dir
+  if [[ ! -f $candidate/Dockerfile && -s $script_dir/source-path ]]; then
+    IFS= read -r candidate < "$script_dir/source-path"
   fi
+  if [[ $candidate == /* && -f $candidate/Dockerfile && -f $candidate/compose.yaml && -f $candidate/install.sh ]]; then
+    source=$candidate
+    source_checkout=$candidate
+    return
+  fi
+  need curl
+  need tar
+  say '正在从 GitHub 下载 HopX 源码…'
+  curl --fail --silent --show-error --location --proto '=https' --proto-redir '=https' \
+    --connect-timeout 15 --max-time 180 --retry 2 --output "$tmp_dir/hopx.tar.gz" "$source_archive" ||
+    die '下载 HopX 源码失败，请检查服务器能否访问 codeload.github.com'
+  source=$tmp_dir/source
+  source_checkout=''
+  mkdir -- "$source"
+  tar -xzf "$tmp_dir/hopx.tar.gz" -C "$source" --strip-components=1 ||
+    die '解压 HopX 源码失败'
+  [[ -f $source/Dockerfile && -f $source/compose.yaml && -f $source/install.sh ]] ||
+    die '下载的 HopX 源码不完整'
+}
+
+save_management_script() {
+  install -m 0700 -- "$source/install.sh" "$workdir/manage.sh"
+  printf '%s\n' "$source_checkout" > "$workdir/source-path"
 }
 
 access() {
@@ -142,10 +164,9 @@ import_initial_database() (
   mv -- "$converted/hopx.db" "$workdir/data/hopx.db"
 )
 
-install_service() {
+install_service() (
   for cmd in docker openssl tar; do need "$cmd"; done
-  local source path port public name pass version image bind
-  source=$(source_directory)
+  local source source_checkout source_tmp path port public name pass version image bind
   read -r -p "安装路径 [默认: $default_dir]: " path
   path=${path:-$default_dir}
   [[ $path == /* && $path != / ]] || die '请使用有效的绝对路径'
@@ -173,6 +194,9 @@ install_service() {
     fi
   fi
   [[ $pass =~ ^[A-Za-z0-9._@!%+-]{10,72}$ ]] || die '密码须为 10–72 位字符，可使用字母、数字和 ._@!%+-'
+  source_tmp=$(mktemp -d)
+  trap 'rm -rf -- "$source_tmp"' EXIT
+  load_source "$source_tmp"
   mkdir -p "$path"
   workdir=$(cd -- "$path" && pwd -P)
   mkdir -p "$workdir"/{data,releases,keys,backups}
@@ -187,8 +211,7 @@ install_service() {
   make_release "$image" "$version" "$workdir/releases/manifest.json" "$source"
   publish_bootstrap "$version"
   cp -- "$source/compose.yaml" "$workdir/compose.yaml"
-  cp -- "$source/install.sh" "$workdir/manage.sh"
-  printf '%s\n' "$source" > "$workdir/source-path"
+  save_management_script
   bind=${HOPX_HOST:-127.0.0.1}
   if [[ -z ${HOPX_HOST:-} && $public =~ ^https?://(localhost|127\.0\.0\.1|\[::1\])(:[0-9]+)?$ ]]; then
     bind=127.0.0.1
@@ -213,7 +236,7 @@ ENV
   unset pass
   HOPX_PASSWORD= compose up -d --wait --wait-timeout 100
   access
-}
+)
 
 backup_archive() (
   set -e
@@ -248,7 +271,7 @@ backup_archive() (
 
 restore_archive() (
   set -e
-  local file keypath key enc mac tmp expected actual name response image version deployed source target
+  local file keypath key enc mac tmp expected actual name response image version deployed source source_checkout target
   local restore_new=false
   deployed=$(recorded)
   workdir=${HOPX_RESTORE_PATH:-$deployed}
@@ -287,7 +310,7 @@ restore_archive() (
   else
     [[ ! -e $workdir ]] || die '目标目录已有数据，请使用新的路径'
     restore_new=true
-    source=$(source_directory)
+    load_source "$tmp"
     version=$(get_version)
     image=$(image_label "$version")
     build_panel "$image" "$version" "$source"
@@ -317,8 +340,7 @@ restore_archive() (
       mv -- "$tmp/new-env" "$workdir/.env"
     fi
     cp -- "$source/compose.yaml" "$workdir/compose.yaml"
-    cp -- "$source/install.sh" "$workdir/manage.sh"
-    printf '%s\n' "$source" > "$workdir/source-path"
+    save_management_script
     make_release "$image" "$version" "$workdir/releases/manifest.json" "$source"
     publish_bootstrap "$version"
     if ! compose up -d --wait --wait-timeout 100 </dev/null; then
@@ -369,15 +391,16 @@ restore_archive() (
   printf '%s\n' "$workdir" > "$state_file"
 )
 
-upgrade_service() {
+upgrade_service() (
   instance
-  local source version image previous staged
-  source=$(source_directory)
-  [[ -f $source/Dockerfile ]] || die '未找到 HopX 源码'
+  local source source_checkout source_tmp version image previous staged
   version=$(get_version)
   image=$(image_label "$version")
   previous=$(getenv HOPX_IMAGE)
   [[ $image != "$previous" ]] || die '当前发行版已安装'
+  source_tmp=$(mktemp -d)
+  trap 'rm -rf -- "$source_tmp"' EXIT
+  load_source "$source_tmp"
   backup_archive
   build_panel "$image" "$version" "$source"
   staged="$workdir/releases/.manifest.next"
@@ -392,10 +415,10 @@ upgrade_service() {
   rm -f -- "$workdir/.env.previous"
   mv -- "$staged" "$workdir/releases/manifest.json"
   publish_bootstrap "$version"
-  cp -- "$source/install.sh" "$workdir/manage.sh"
+  save_management_script
   say '面板升级成功，节点将自动按批更新。'
   access
-}
+)
 
 migrate_nyanpass() (
   instance
