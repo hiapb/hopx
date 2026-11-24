@@ -7,6 +7,8 @@ export function useConfirmAction() {
   const { modal } = App.useApp();
   return ({ onOk, ...options }: Confirmation) => {
     const dialog = modal.confirm({
+      icon: null,
+      autoFocusButton: "cancel",
       ...options,
       onOk: async () => {
         if (!await onOk()) throw new Error("操作未完成");

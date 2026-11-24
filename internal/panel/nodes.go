@@ -667,7 +667,7 @@ func (s *Server) compileGroupWithTickets(group int64, previous, tickets map[wire
 	if entry.Kind != "entry" && entry.Kind != "both" {
 		return withConfigRevision(config)
 	}
-	rows, e := s.db.Query(`SELECT r.id,r.json,u.id,u.admin,u.group_id,g.ratio,u.expires,u.quota_epoch,u.quota,
+	rows, e := s.db.Query(`SELECT r.id,r.json,u.id,u.admin,u.group_id,g.ratio,u.expires,u.quota_epoch,u.unlimited_traffic,
 		coalesce(u.rate_override,p.rate_mbps,0),coalesce(u.ips_override,p.max_ips,0),coalesce(u.connections_override,p.max_connections,0)
 		FROM rules r JOIN users u ON u.id=r.owner JOIN groups g ON g.id=r.entry LEFT JOIN plans p ON p.id=u.plan_id
 		WHERE r.entry=? AND json_extract(r.json,'$.enabled')=1 AND `+ruleServiceActiveSQL+` AND `+ruleRouteReadySQL+` ORDER BY r.id`, group)
@@ -686,7 +686,7 @@ func (s *Server) compileGroupWithTickets(group int64, previous, tickets map[wire
 		var raw string
 		var id int64
 		var u User
-		if e = rows.Scan(&id, &raw, &u.ID, &u.Admin, &u.Group, &f.Ratio, &f.Expires, &f.QuotaEpoch, &u.Quota, &f.UserRate, &f.UserIPs, &f.UserConnections); e != nil {
+		if e = rows.Scan(&id, &raw, &u.ID, &u.Admin, &u.Group, &f.Ratio, &f.Expires, &f.QuotaEpoch, &u.UnlimitedTraffic, &f.UserRate, &f.UserIPs, &f.UserConnections); e != nil {
 			return config, e
 		}
 		if e = json.Unmarshal([]byte(raw), &f.Rule); e != nil {
@@ -741,7 +741,7 @@ func (s *Server) compileGroupWithTickets(group int64, previous, tickets map[wire
 				virtualGroup = selected[0]
 			}
 			identity := wire.ExitMeter{VirtualGroup: virtualGroup, Rule: f.ID, Owner: f.Owner, Group: path[len(path)-1], Epoch: f.QuotaEpoch,
-				Ratio: ratio, Managed: u.Quota > 0 && ratio > 0}
+				Ratio: ratio, Managed: !u.UnlimitedTraffic && ratio > 0}
 			ticket := previous[identity]
 			if ticket == "" {
 				ticket = identity.Sign(s.meterKey)
@@ -763,7 +763,7 @@ func (s *Server) compileGroupWithTickets(group int64, previous, tickets map[wire
 			backupRatio += entryRatio
 			f.BackupRatio = &backupRatio
 		}
-		f.QuotaManaged = u.Quota > 0 && (f.Ratio > 0 || (f.BackupRatio != nil && *f.BackupRatio > 0))
+		f.QuotaManaged = !u.UnlimitedTraffic && (f.Ratio > 0 || (f.BackupRatio != nil && *f.BackupRatio > 0))
 		f.MaxFailures, f.RecoverySeconds = entry.Routing.MaxFailures, entry.Routing.RecoverySeconds
 		if len(primary) != 0 || len(backup) != 0 {
 			routed = append(routed, rulePaths{len(config.Rules), primary, backup})

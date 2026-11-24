@@ -53,7 +53,7 @@ import {
   Wallet,
   Workflow,
 } from "lucide-react";
-import { api, bytes, currency, date, ruleLimitLabel, useData } from "./api";
+import { api, bytes, currency, date, planExpiryLabel, ruleLimitLabel, useData } from "./api";
 import type { Group, Node, Plan, User } from "./api";
 import JsonEditor from "./json-editor";
 import { paymentKinds } from "./payment-channels";
@@ -70,7 +70,7 @@ type Field = {
   name: string;
   path?: string[];
   label: string;
-  kind?: "number" | "decimal" | "date" | "switch" | "secret" | "area" | "select" | "multi" | "tags";
+  kind?: "number" | "decimal" | "date" | "switch" | "checkbox" | "secret" | "area" | "select" | "multi" | "tags";
   unit?: string;
   help?: string;
   placeholder?: string;
@@ -186,9 +186,9 @@ const planFields: Field[] = [
     label: "流量配额",
     kind: "decimal",
     unit: "GiB",
-    help: "填 0 表示不限流量",
     required: true,
   },
+  { name: "unlimitedTraffic", label: "不限流量", kind: "switch" },
   { name: "groupId", label: "用户组", kind: "select" },
   { name: "enabled", label: "上架", kind: "switch" },
   { name: "rules", label: "转发规则上限", kind: "number", min: 0, max: 100000, unit: "条", placeholder: "不限制" },
@@ -227,7 +227,7 @@ function PlanCard({ plan, actions, badge, sortControl, group, ...dragEvents }: {
       {plan.description && <p className="plan-description">{plan.description}</p>}
       <dl className="shop-plan-terms">
         <div><dt><CalendarDays size={16} aria-hidden="true" />有效期</dt><dd>{period}</dd></div>
-        <div><dt><Gauge size={16} aria-hidden="true" />流量配额</dt><dd>{plan.quota ? bytes(plan.quota) : "不限流量"}</dd></div>
+        <div><dt><Gauge size={16} aria-hidden="true" />流量配额</dt><dd>{plan.unlimitedTraffic ? "不限流量" : bytes(plan.quota)}</dd></div>
         <div><dt><Workflow size={16} aria-hidden="true" />转发规则</dt><dd>{plan.rules ? plan.rules + " 条" : "不限制"}</dd></div>
         {plan.rateMbps > 0 && <div><dt><Timer size={16} aria-hidden="true" />用户限速</dt><dd>{plan.rateMbps} Mbps</dd></div>}
         {plan.maxIPs > 0 && <div><dt><Network size={16} aria-hidden="true" />IP 数量上限</dt><dd>{plan.maxIPs} 个</dd></div>}
@@ -242,9 +242,10 @@ const tunnelFields = groupFields.filter(field => ["name", "relayMode", "offlineS
 const userFields: Field[] = [
   { name: "banned", label: "封禁", kind: "switch" },
   { name: "admin", label: "管理员", kind: "switch" },
-  { name: "group", label: "用户组 ID", kind: "number" },
+  { name: "group", label: "用户组", kind: "select" },
   { name: "usedGiB", label: "已用流量", kind: "decimal", unit: "GiB", required: true },
-  { name: "quotaGiB", label: "可用流量", kind: "decimal", unit: "GiB", required: true, help: "0 为无限" },
+  { name: "quotaGiB", label: "流量配额", kind: "decimal", unit: "GiB", required: true },
+  { name: "unlimitedTraffic", label: "不限流量", kind: "switch" },
   { name: "expiresAt", label: "到期时间", kind: "date" },
   { name: "maxRules", label: "最大规则数", kind: "number" },
   { name: "rateOverride", label: "用户限速", kind: "number", unit: "Mbps", help: "留空沿用套餐，0 为不限" },
@@ -273,11 +274,15 @@ function FieldInput({ field, ...props }: { field: Field; [key: string]: any }) {
       return <InputNumber {...props} style={{ width: "100%" }} precision={0} min={field.min} max={field.max}
         addonAfter={field.unit} placeholder={field.placeholder} />;
     case "decimal":
-      return <InputNumber {...props} style={{ width: "100%" }} min={field.min ?? 0} max={field.max} step={field.step ?? 0.01} precision={field.precision} addonAfter={field.unit} />;
+      return <InputNumber {...props} style={{ width: "100%" }} min={field.min ?? 0} max={field.max}
+        step={field.step ?? 0.01} precision={field.precision} addonAfter={field.unit}
+        formatter={field.unit === "GiB" ? (value, { userTyping, input }) => userTyping ? input : String(value ?? "") : undefined} />;
     case "date":
       return <DatePicker {...props} style={{ width: "100%" }} showTime format="YYYY-MM-DD HH:mm:ss" />;
     case "switch":
       return <Switch {...props} />;
+    case "checkbox":
+      return <Checkbox {...props}>{field.label}</Checkbox>;
     case "secret":
       return <Input.Password {...props} autoComplete="new-password" />;
     case "area":
@@ -436,6 +441,11 @@ export default function Management({ page, user, refresh }: Props) {
   const editingKind = Form.useWatch("kind", form);
   const planUsesPeriod = editingKind !== "traffic" && editingKind !== "stack";
   const editingPlan = editor?.fields === planFields;
+  const unlimitedTraffic = Form.useWatch("unlimitedTraffic", form);
+  const assignedPlan = Form.useWatch("planId", form);
+  const editingUserPlan = editor?.path.endsWith("/plan");
+  const pushingPlan = editor?.path.endsWith("/push");
+  const editingUser = editor?.fields === userFields;
   const customReferral = Form.useWatch("custom", form);
   const { message, modal } = App.useApp();
   const confirmAction = useConfirmAction();
@@ -570,7 +580,7 @@ export default function Management({ page, user, refresh }: Props) {
 
   function editPlan(plan?: Plan) {
     edit(plan ? "编辑套餐" : "添加套餐", "/admin/plans" + (plan ? "/" + plan.id : ""), plan ? "PUT" : "POST", planFields, {
-      kind: "day", enabled: true, duration: 30, groupId: 0,
+      kind: "day", enabled: true, duration: 30, groupId: 0, unlimitedTraffic: false,
       ...plan,
       rules: plan?.rules || undefined,
       rateMbps: plan?.rateMbps || undefined,
@@ -642,7 +652,8 @@ export default function Management({ page, user, refresh }: Props) {
       delete payload.expiresAt;
       delete payload.balanceAmount;
       payload.expires = expiresAt?.unix() ?? 0;
-      if (quotaGiB !== original.quotaGiB) payload.quota = Math.round(quotaGiB * gib);
+      if (payload.unlimitedTraffic) payload.quota = 0;
+      else if (quotaGiB !== original.quotaGiB) payload.quota = Math.round(quotaGiB * gib);
       if (usedGiB !== original.usedGiB) payload.usageAdjustment = {
         from: original.used, to: Math.round(usedGiB * gib), epoch: original.quotaEpoch,
       };
@@ -653,10 +664,14 @@ export default function Management({ page, user, refresh }: Props) {
     if (editor.fields === planFields) {
       payload.price = Math.round(value.priceAmount * 100);
       for (const field of planLimitFields) payload[field] = value[field] ?? 0;
-      if (value.quotaGiB !== editor.value.quotaGiB || !editor.value.id) payload.quota = Math.round(value.quotaGiB * gib);
+      if (payload.unlimitedTraffic) payload.quota = 0;
+      else if (value.quotaGiB !== editor.value.quotaGiB || !editor.value.id) payload.quota = Math.round(value.quotaGiB * gib);
       if (!planUsesPeriod) payload.duration = 1;
       delete payload.priceAmount;
       delete payload.quotaGiB;
+    }
+    if (editingUserPlan && !payload.planId) {
+      for (const key of ["quota", "group", "rules", "limits", "expires"]) payload[key] = false;
     }
     if (editor.path.endsWith("/referral")) {
       payload.rate = Math.round((payload.ratePercent ?? 0) * 100);
@@ -1187,8 +1202,8 @@ export default function Management({ page, user, refresh }: Props) {
               <span className="data-title">{name}</span>
               {narrow && <span className="data-secondary">{row.banned ? "封禁" : row.admin ? "管理员" : currency(row.balance)}</span>}
             </> },
-            { title: "过期时间", dataIndex: "expires", ...sortable("expires"), render: date },
-            { title: "流量", ...sortable("traffic"), render: (_: unknown, r: User) => bytes(r.used) + " / " + (r.quota ? bytes(r.quota) : "∞") },
+            { title: "过期时间", dataIndex: "expires", ...sortable("expires"), render: (_: number, r: User) => planExpiryLabel(r) },
+            { title: "流量", ...sortable("traffic"), render: (_: unknown, r: User) => bytes(r.used) + " / " + (r.unlimitedTraffic ? "不限流量" : bytes(r.quota)) },
             { title: "套餐", dataIndex: "planId", render: (id: number) => userPlans.value.find(plan => plan.id === id)?.name || (id ? "#" + id : "—") },
             { title: "用户组", dataIndex: "group", render: (id: number) => groupUsers.value.find(group => group.id === id)?.name || "#" + id },
             { title: "最大规则数", dataIndex: "maxRules", ...sortable("rules"), render: (_: number, account: User) => ruleLimitLabel(account) },
@@ -1207,13 +1222,14 @@ export default function Management({ page, user, refresh }: Props) {
                     ...r, usedGiB: displayGiB(r.used), quotaGiB: displayGiB(r.quota),
                     expiresAt: r.expires ? dayjs.unix(r.expires) : null, balanceAmount: r.balance / 100,
                   }) },
-                  { label: "编辑用户套餐", icon: ShoppingBag, onClick: () => edit("编辑用户套餐", "/admin/users/" + r.id + "/plan", "PUT", [
+                  { label: "编辑用户套餐", icon: ShoppingBag, onClick: () => edit(`编辑用户套餐 · ${r.name}`, "/admin/users/" + r.id + "/plan", "PUT", [
                     { name: "planId", label: "套餐", kind: "select", required: true, options: [{ value: 0, label: "无套餐" }, ...(Array.isArray(userPlans.value) ? userPlans.value.map((plan) => ({value: plan.id, label: plan.name})) : [])] },
-                    { name: "quota", label: "同步套餐流量并重置已用流量", kind: "switch" },
-                    { name: "group", label: "同步套餐用户组", kind: "switch" },
-                    { name: "rules", label: "同步套餐规则上限", kind: "switch" },
-                    { name: "limits", label: "同步限速与连接限制", kind: "switch" },
-                  ], { planId: r.planId }) },
+                    { name: "expires", label: "同步到期时间", kind: "checkbox", help: "从保存时计算新的有效期。" },
+                    { name: "quota", label: "同步流量并重置已用量", kind: "checkbox" },
+                    { name: "group", label: "同步用户组", kind: "checkbox" },
+                    { name: "rules", label: "同步规则上限", kind: "checkbox" },
+                    { name: "limits", label: "同步限速与连接限制", kind: "checkbox" },
+                  ], { planId: r.planId, expires: !r.expires }) },
                   { label: "邀请返佣设置", icon: Gift, onClick: async () => {
                     const path = "/admin/users/" + r.id + "/referral";
                     try {
@@ -1337,11 +1353,12 @@ export default function Management({ page, user, refresh }: Props) {
                     actions={
                       <>
                         <Button size="small" onClick={() => editPlan(plan)}>编辑</Button>
-                        <Button size="small" onClick={() => edit("推送套餐更新", "/admin/plans/" + plan.id + "/push", "POST", [
-                          { name: "quota", label: "同步流量配额", kind: "switch" },
-                          { name: "group", label: "同步用户组", kind: "switch" },
-                          { name: "rules", label: "同步转发规则上限", kind: "switch" },
-                          { name: "limits", label: "同步限速、IP 和连接数上限", kind: "switch" },
+                        <Button size="small" onClick={() => edit(`推送套餐更新 · ${plan.name}`, "/admin/plans/" + plan.id + "/push", "POST", [
+                          { name: "expires", label: "同步到期时间", kind: "checkbox", help: "从推送时计算新的有效期。" },
+                          { name: "quota", label: "同步流量配额", kind: "checkbox" },
+                          { name: "group", label: "同步用户组", kind: "checkbox" },
+                          { name: "rules", label: "同步规则上限", kind: "checkbox" },
+                          { name: "limits", label: "同步限速、IP 和连接数上限", kind: "checkbox" },
                         ])}>推送更新</Button>
                         <Dropdown trigger={["click"]} menu={{ items: [{
                           key: "delete", label: "删除套餐", danger: true, onClick: () => confirm("删除 " + plan.name + "？", "/admin/plans/" + plan.id),
@@ -1667,26 +1684,31 @@ export default function Management({ page, user, refresh }: Props) {
       key={f.name}
       className={f.kind === "area" || ["portRanges", "chain", "allowedTo"].includes(f.name) ? "field-wide" : undefined}
       name={f.path ?? f.name}
-      label={f.label}
-      tooltip={f.help}
-      extra={f.name === "relayMode" ? relayModeHelp(groupTransport) : undefined}
-      valuePropName={f.kind === "switch" ? "checked" : "value"}
+      label={f.kind === "checkbox" ? undefined : f.label}
+      tooltip={f.kind === "checkbox" ? undefined : f.help}
+      extra={f.kind === "checkbox" ? f.help
+        : f.name === "quotaGiB" && !unlimitedTraffic ? "填 0 时，配额为 0 B。"
+        : f.name === "relayMode" ? relayModeHelp(groupTransport) : undefined}
+      valuePropName={f.kind === "switch" || f.kind === "checkbox" ? "checked" : "value"}
       {...(f.name === "ratio" && {
         getValueProps: (ratio: number | undefined) => ({ value: ratio == null ? undefined : ratio / 1000 }),
         normalize: (multiplier: number | null) => multiplier == null ? undefined : Math.round(multiplier * 1000),
       })}
-      rules={[{ required: f.required }]}
+      rules={[{ required: f.required && !(f.name === "quotaGiB" && unlimitedTraffic) }]}
     >
-      <FieldInput field={f.name === "kind" && editingGroup ? {
+      <FieldInput disabled={(f.name === "quotaGiB" && Boolean(unlimitedTraffic)) || (editingUserPlan && f.kind === "checkbox" && !assignedPlan)}
+        field={f.name === "kind" && editingGroup ? {
         ...f,
         options: legacyKind
           ? [...groupKinds.filter(option => option.value !== "chain"), { value: originalKind, label: groupKindLabel(originalKind) + "（历史配置）", disabled: true }]
           : groupKinds.filter(option => (option.value === "chain") === (originalKind === "chain")),
-      } : editingPlan && f.name === "groupId" ? {
+      } : (editingPlan && f.name === "groupId") || (editingUser && f.name === "group") ? {
         ...f, options: groupUsers.value.map(group => ({ value: group.id, label: group.name })),
       } : editingPlan && f.name === "duration" ? { ...f, unit: editingKind === "month" ? "个月" : "天" } : f} />
     </Form.Item>
   ));
+  const quotaFields = orderedFields(["quotaGiB", "unlimitedTraffic"]);
+  const userLimits = ["maxRules", "rateOverride", "ipsOverride", "connectionsOverride"];
 
   return (
     <>
@@ -1755,7 +1777,8 @@ export default function Management({ page, user, refresh }: Props) {
           "aria-label": accounting ? "确认记账" : editor?.path.endsWith("/credit") ? "预览记账" : "保存",
           disabled: accounting !== undefined && accounting.after < 0,
         }}
-        width={page === "groups" || page === "plans" || page === "users" || page === "settings" ? 680 : 520}
+        width={editingUserPlan || pushingPlan ? 482 : page === "groups" || page === "plans" || page === "users" || page === "settings" ? 680 : 520}
+        className="management-modal"
       >
         <Form name="management-editor" layout="vertical" form={form} onFinish={submit}>
           {editor?.path.endsWith("/password") && <p className="muted alert-gap">保存后，此账号的现有登录会失效。</p>}
@@ -1793,7 +1816,10 @@ export default function Management({ page, user, refresh }: Props) {
           ) : editingPlan ? (
             <>
               <div className="equipment-editor">
-                {renderFields(editorFields.filter(field => !planLimitFields.has(field.name)))}
+                {renderFields(editorFields.filter(field => !planLimitFields.has(field.name) && !quotaFields.includes(field)))}
+              </div>
+              <div className="quota-editor">
+                {renderFields(quotaFields)}
               </div>
               <section className="editor-section">
                 <h3>使用限制</h3>
@@ -1802,8 +1828,27 @@ export default function Management({ page, user, refresh }: Props) {
                 </div>
               </section>
             </>
+          ) : editingUser ? (
+            <>
+              <div className="equipment-editor">{renderFields(orderedFields(["group", "expiresAt", "usedGiB", "balanceAmount"]))}</div>
+              <div className="quota-editor">{renderFields(quotaFields)}</div>
+              <section className="editor-section">
+                <h3>使用限制</h3>
+                <div className="equipment-editor">{renderFields(orderedFields(userLimits))}</div>
+              </section>
+              <section className="editor-section">
+                <h3>账户权限</h3>
+                <div className="equipment-editor editor-toggle-grid">{renderFields(orderedFields(["admin", "allowDevice", "banned"]))}</div>
+              </section>
+              {renderFields(orderedFields(["note"]))}
+            </>
+          ) : editingUserPlan || pushingPlan ? (
+            <>
+              {renderFields(orderedFields(["planId"]))}
+              <div className="plan-sync-options">{renderFields(editorFields.filter(field => field.kind === "checkbox"))}</div>
+            </>
           ) : (
-            <div hidden={!!accounting} className={editor?.fields === userFields ? "user-editor" : ["plans", "users", "settings"].includes(page) ? "equipment-editor" : undefined}>
+            <div hidden={!!accounting} className={["plans", "users", "settings"].includes(page) ? "equipment-editor" : undefined}>
               {renderFields(editorFields)}
             </div>
           )}

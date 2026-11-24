@@ -231,7 +231,7 @@ func TestAutomaticRenewalSkipsUnfundedAccounts(t *testing.T) {
 	}
 	defer panel.Close()
 	_, err = panel.db.Exec(`
-		INSERT INTO plans(id,name,description,price,duration,quota,rules,group_id) VALUES (1,'Paid','',100,30,0,0,0);
+		INSERT INTO plans(id,name,description,price,duration,quota,rules,group_id) VALUES (1,'Paid','',100,30,100,0,0);
 		WITH RECURSIVE numbers(n) AS (VALUES(2) UNION ALL SELECT n+1 FROM numbers WHERE n<102)
 		INSERT INTO users(id,name,password,invite,plan_id,expires,auto_renew,balance)
 			SELECT n,'member'||n,X'00','fixture'||n,1,unixepoch()-60,1,CASE WHEN n=102 THEN 100 ELSE 0 END FROM numbers;
@@ -243,6 +243,100 @@ func TestAutomaticRenewalSkipsUnfundedAccounts(t *testing.T) {
 	var id int64
 	if err = panel.db.QueryRow("SELECT user_id FROM orders WHERE kind='renew'").Scan(&id); err != nil || id != 102 {
 		t.Fatalf("funded account was not renewed: user %d, %v", id, err)
+	}
+}
+
+func TestSyncPlanExpiryAndExplicitTrafficLimit(t *testing.T) {
+	panel, err := Open(Options{Database: filepath.Join(t.TempDir(), "plan.db"), AdminPassword: "test-password-123"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer panel.Close()
+	server := httptest.NewServer(panel.Handler())
+	defer server.Close()
+	jar, _ := cookiejar.New(nil)
+	client := &http.Client{Jar: jar}
+	base := server.URL + "/api"
+	testRequest(t, client, "POST", base+"/login", nil, map[string]string{"name": "admin", "password": "test-password-123"}, 200, nil)
+
+	plan := Plan{Name: "Fixture", Kind: "traffic", Duration: 1, Enabled: true, Price: 100, Quota: 500, UnlimitedTraffic: true}
+	testRequest(t, client, "POST", base+"/admin/plans", nil, plan, 200, &plan)
+	if plan.Quota != 0 || !plan.UnlimitedTraffic {
+		t.Fatalf("unlimited plan did not normalize quota: %+v", plan)
+	}
+	assign := base + "/admin/users/1/plan"
+	testRequest(t, client, "PUT", assign, nil, map[string]any{"planId": plan.ID, "quota": true, "expires": true}, 204, nil)
+	var user User
+	testRequest(t, client, "GET", base+"/me", nil, nil, 200, &user)
+	if user.Expires != 253402300799 || !user.UnlimitedTraffic || user.ServiceBlock != "" {
+		t.Fatalf("assignment did not apply unlimited time and traffic: %+v", user)
+	}
+
+	plan.UnlimitedTraffic, plan.Kind, plan.Duration = false, "day", 10
+	adminPlan := fmt.Sprintf("%s/admin/plans/%d", base, plan.ID)
+	testRequest(t, client, "PUT", adminPlan, nil, plan, 200, nil)
+	start := time.Now().Unix()
+	testRequest(t, client, "POST", adminPlan+"/push", nil, map[string]bool{"quota": true, "expires": true}, 200, nil)
+	testRequest(t, client, "GET", base+"/me", nil, nil, 200, &user)
+	if user.UnlimitedTraffic || user.Quota != 0 || user.ServiceBlock != "套餐流量已用完，请续费" ||
+		user.Expires < start+10*86400 || user.Expires > time.Now().Unix()+10*86400 {
+		t.Fatalf("push did not apply zero traffic and the new expiry: %+v", user)
+	}
+	if _, err = panel.db.Exec("UPDATE users SET balance=500 WHERE id=1"); err != nil {
+		t.Fatal(err)
+	}
+	panel.renew()
+	var orders int
+	if err = panel.db.QueryRow("SELECT count(*) FROM orders WHERE kind='renew'").Scan(&orders); err != nil || orders != 0 {
+		t.Fatalf("zero-quota plan triggered automatic renewal: %d, %v", orders, err)
+	}
+	var quote struct {
+		Quota            int64
+		UnlimitedTraffic bool
+	}
+	testRequest(t, client, "GET", base+"/me/renew", nil, nil, 200, &quote)
+	if quote.Quota != 0 || quote.UnlimitedTraffic {
+		t.Fatalf("zero-quota renewal was quoted as unlimited: %+v", quote)
+	}
+	plan.UnlimitedTraffic = true
+	testRequest(t, client, "PUT", adminPlan, nil, plan, 200, nil)
+	testRequest(t, client, "POST", base+"/me/renew", nil, map[string]any{
+		"expectedPrice": plan.Price, "expectedQuota": quote.Quota, "expectedUnlimitedTraffic": quote.UnlimitedTraffic,
+	}, 409, nil)
+	testRequest(t, client, "GET", base+"/me", nil, nil, 200, &user)
+	if user.Balance != 500 || user.UnlimitedTraffic {
+		t.Fatalf("stale renewal quote changed the account: %+v", user)
+	}
+}
+
+func TestTrafficQuotaSchemaUpgradeKeepsZero(t *testing.T) {
+	options := Options{Database: filepath.Join(t.TempDir(), "plan.db"), AdminPassword: "test-password-123"}
+	panel, err := Open(options)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, err = panel.db.Exec(`
+		ALTER TABLE users DROP COLUMN unlimited_traffic;
+		ALTER TABLE plans DROP COLUMN unlimited_traffic;
+		INSERT INTO plans(id,name,description,price,duration,quota,rules,group_id) VALUES(1,'Zero traffic','',0,30,0,0,0);
+		UPDATE users SET plan_id=1,quota=0,expires=unixepoch()+86400 WHERE id=1;
+	`)
+	panel.Close()
+	if err != nil {
+		t.Fatal(err)
+	}
+	panel, err = Open(options)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer panel.Close()
+	plan, err := readPlan(panel.db.QueryRow("SELECT " + planColumns + " FROM plans WHERE id=1"))
+	if err != nil || plan.Quota != 0 || plan.UnlimitedTraffic {
+		t.Fatalf("upgraded plan must have zero traffic: %+v, %v", plan, err)
+	}
+	user, err := readUser(panel.db.QueryRow(userSelect + " WHERE id=1"))
+	if err != nil || user.Quota != 0 || user.UnlimitedTraffic {
+		t.Fatalf("upgraded user must have zero traffic: %+v, %v", user, err)
 	}
 }
 

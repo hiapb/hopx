@@ -53,9 +53,11 @@ func (s *Server) walletTransfer(w http.ResponseWriter, r *http.Request, u User) 
 
 func (s *Server) renewUser(w http.ResponseWriter, r *http.Request, u User) {
 	var input struct {
-		ExpectedPlan  *int64
-		ExpectedPrice *int64
-		ExpectedEpoch *int64
+		ExpectedPlan             *int64
+		ExpectedPrice            *int64
+		ExpectedEpoch            *int64
+		ExpectedQuota            *int64
+		ExpectedUnlimitedTraffic *bool
 	}
 	if r.Method == http.MethodPost && r.ContentLength != 0 && !decode(w, r, &input) {
 		return
@@ -89,20 +91,21 @@ func (s *Server) renewUser(w http.ResponseWriter, r *http.Request, u User) {
 		dbFailure(w, err)
 		return
 	}
+	next, quota, err := planTerms(plan, account.PlanID, account.Expires, account.Quota, account.Used, time.Now().Unix(), true)
+	if err != nil {
+		fail(w, 409, err.Error())
+		return
+	}
 	if r.Method == http.MethodGet {
-		next, quota, err := planTerms(plan, account.PlanID, account.Expires, account.Quota, account.Used, time.Now().Unix(), true)
-		if err != nil {
-			fail(w, 409, err.Error())
-			return
-		}
 		respond(w, 200, map[string]any{
 			"planId": plan.ID, "name": plan.Name, "kind": plan.Kind, "price": plan.Price,
-			"expires": account.Expires, "nextExpires": next, "quota": quota, "balance": account.Balance, "epoch": epoch,
+			"expires": account.Expires, "nextExpires": next, "quota": quota, "unlimitedTraffic": plan.UnlimitedTraffic, "balance": account.Balance, "epoch": epoch,
 		})
 		return
 	}
 	if (input.ExpectedPlan != nil && *input.ExpectedPlan != plan.ID) || (input.ExpectedPrice != nil && *input.ExpectedPrice != plan.Price) ||
-		(input.ExpectedEpoch != nil && *input.ExpectedEpoch != epoch) {
+		(input.ExpectedEpoch != nil && *input.ExpectedEpoch != epoch) || (input.ExpectedQuota != nil && *input.ExpectedQuota != quota) ||
+		(input.ExpectedUnlimitedTraffic != nil && *input.ExpectedUnlimitedTraffic != plan.UnlimitedTraffic) {
 		fail(w, 409, "套餐或用量周期已变化，请重新预览")
 		return
 	}

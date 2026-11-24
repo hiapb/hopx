@@ -90,6 +90,7 @@ type User struct {
 	Banned              bool   `json:"banned"`
 	Group               int64  `json:"group"`
 	Quota               int64  `json:"quota"`
+	UnlimitedTraffic    bool   `json:"unlimitedTraffic"`
 	Used                int64  `json:"used"`
 	Balance             int64  `json:"balance"`
 	Expires             int64  `json:"expires"`
@@ -101,7 +102,7 @@ type User struct {
 	ServiceBlock        string `json:"serviceBlock,omitempty"`
 }
 
-const userColumns = "id,name,admin,banned,group_id,quota,used,balance,expires,max_rules,plan_id,invite,auto_renew,note,rate_override,ips_override,connections_override,affiliate_balance,allow_device"
+const userColumns = "id,name,admin,banned,group_id,quota,unlimited_traffic,used,balance,expires,max_rules,plan_id,invite,auto_renew,note,rate_override,ips_override,connections_override,affiliate_balance,allow_device"
 const userSelect = "SELECT " + userColumns + " FROM users"
 
 type scanner interface{ Scan(...any) error }
@@ -118,7 +119,7 @@ func readUser(row scanner) (u User, err error) {
 }
 
 func scanUser(row scanner, u *User, extra ...any) error {
-	fields := []any{&u.ID, &u.Name, &u.Admin, &u.Banned, &u.Group, &u.Quota, &u.Used, &u.Balance, &u.Expires, &u.MaxRules, &u.PlanID, &u.Invite, &u.AutoRenew, &u.Note, &u.RateOverride, &u.IPsOverride, &u.ConnectionsOverride, &u.AffiliateBalance, &u.AllowDevice}
+	fields := []any{&u.ID, &u.Name, &u.Admin, &u.Banned, &u.Group, &u.Quota, &u.UnlimitedTraffic, &u.Used, &u.Balance, &u.Expires, &u.MaxRules, &u.PlanID, &u.Invite, &u.AutoRenew, &u.Note, &u.RateOverride, &u.IPsOverride, &u.ConnectionsOverride, &u.AffiliateBalance, &u.AllowDevice}
 	return row.Scan(append(fields, extra...)...)
 }
 
@@ -143,6 +144,7 @@ func Open(o Options) (*Server, error) {
 		},
 		"users": {
 			"billing_remainder": "INTEGER NOT NULL DEFAULT 0", "quota_epoch": "INTEGER NOT NULL DEFAULT 0",
+			"unlimited_traffic": "INTEGER NOT NULL DEFAULT 0",
 			"auto_renew_configured": "INTEGER NOT NULL DEFAULT 0",
 			"rate_override":         "INTEGER", "ips_override": "INTEGER", "connections_override": "INTEGER",
 			"affiliate_balance": "INTEGER NOT NULL DEFAULT 0", "allow_device": "INTEGER NOT NULL DEFAULT 0",
@@ -153,7 +155,7 @@ func Open(o Options) (*Server, error) {
 		"payment_channels":       {"show_order": "INTEGER NOT NULL DEFAULT 0"},
 		"notifications":          {"topic": "TEXT NOT NULL DEFAULT ''"},
 		"telegram_links":         {"income": "INTEGER NOT NULL DEFAULT 0", "updown": "INTEGER NOT NULL DEFAULT 0"},
-		"plans":                  {"rate_mbps": "INTEGER NOT NULL DEFAULT 0", "max_ips": "INTEGER NOT NULL DEFAULT 0", "max_connections": "INTEGER NOT NULL DEFAULT 0", "kind": "TEXT NOT NULL DEFAULT 'day'", "show_order": "INTEGER NOT NULL DEFAULT 0", "archived": "INTEGER NOT NULL DEFAULT 0"},
+		"plans":                  {"rate_mbps": "INTEGER NOT NULL DEFAULT 0", "max_ips": "INTEGER NOT NULL DEFAULT 0", "max_connections": "INTEGER NOT NULL DEFAULT 0", "kind": "TEXT NOT NULL DEFAULT 'day'", "show_order": "INTEGER NOT NULL DEFAULT 0", "archived": "INTEGER NOT NULL DEFAULT 0", "unlimited_traffic": "INTEGER NOT NULL DEFAULT 0"},
 		"orders":                 {"checkout_channel": "TEXT NOT NULL DEFAULT ''", "checkout_url": "TEXT NOT NULL DEFAULT ''", "checkout_fee": "INTEGER NOT NULL DEFAULT 0", "checkout_qr": "INTEGER NOT NULL DEFAULT 0", "paid_at": "INTEGER NOT NULL DEFAULT 0", "archived": "INTEGER NOT NULL DEFAULT 0"},
 	}
 	for table, defs := range columns {

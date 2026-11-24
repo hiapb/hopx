@@ -72,6 +72,7 @@ export type User = {
   banned: boolean;
   group: number;
   quota: number;
+  unlimitedTraffic: boolean;
   used: number;
   balance: number;
   expires: number;
@@ -229,6 +230,7 @@ export type Plan = {
   price: number;
   duration: number;
   quota: number;
+  unlimitedTraffic: boolean;
   rules: number;
   groupId: number;
   enabled: boolean;

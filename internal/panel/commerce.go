@@ -18,26 +18,27 @@ import (
 )
 
 type Plan struct {
-	ShowOrder      int    `json:"showOrder"`
-	Kind           string `json:"kind"`
-	RateMbps       int    `json:"rateMbps"`
-	MaxIPs         int    `json:"maxIPs"`
-	MaxConnections int    `json:"maxConnections"`
-	ID             int64  `json:"id"`
-	Name           string `json:"name"`
-	Description    string `json:"description"`
-	Price          int64  `json:"price"`
-	Duration       int64  `json:"duration"`
-	Quota          int64  `json:"quota"`
-	Rules          int    `json:"rules"`
-	GroupID        int64  `json:"groupId"`
-	Enabled        bool   `json:"enabled"`
+	ShowOrder        int    `json:"showOrder"`
+	Kind             string `json:"kind"`
+	RateMbps         int    `json:"rateMbps"`
+	MaxIPs           int    `json:"maxIPs"`
+	MaxConnections   int    `json:"maxConnections"`
+	ID               int64  `json:"id"`
+	Name             string `json:"name"`
+	Description      string `json:"description"`
+	Price            int64  `json:"price"`
+	Duration         int64  `json:"duration"`
+	Quota            int64  `json:"quota"`
+	UnlimitedTraffic bool   `json:"unlimitedTraffic"`
+	Rules            int    `json:"rules"`
+	GroupID          int64  `json:"groupId"`
+	Enabled          bool   `json:"enabled"`
 }
 
-const planColumns = "id,name,description,price,duration,quota,rules,group_id,enabled,rate_mbps,max_ips,max_connections,kind,show_order"
+const planColumns = "id,name,description,price,duration,quota,unlimited_traffic,rules,group_id,enabled,rate_mbps,max_ips,max_connections,kind,show_order"
 
 func readPlan(row scanner) (p Plan, e error) {
-	e = row.Scan(&p.ID, &p.Name, &p.Description, &p.Price, &p.Duration, &p.Quota, &p.Rules, &p.GroupID, &p.Enabled, &p.RateMbps, &p.MaxIPs, &p.MaxConnections, &p.Kind, &p.ShowOrder)
+	e = row.Scan(&p.ID, &p.Name, &p.Description, &p.Price, &p.Duration, &p.Quota, &p.UnlimitedTraffic, &p.Rules, &p.GroupID, &p.Enabled, &p.RateMbps, &p.MaxIPs, &p.MaxConnections, &p.Kind, &p.ShowOrder)
 	return
 }
 
@@ -71,16 +72,19 @@ func (s *Server) savePlan(w http.ResponseWriter, r *http.Request, u User) {
 		fail(w, 400, "套餐数据无效")
 		return
 	}
-	args := []any{p.Name, p.Description, p.Price, p.Duration, p.Quota, p.Rules, p.GroupID, p.Enabled, p.RateMbps, p.MaxIPs, p.MaxConnections, p.Kind, p.ShowOrder}
+	if p.UnlimitedTraffic {
+		p.Quota = 0
+	}
+	args := []any{p.Name, p.Description, p.Price, p.Duration, p.Quota, p.UnlimitedTraffic, p.Rules, p.GroupID, p.Enabled, p.RateMbps, p.MaxIPs, p.MaxConnections, p.Kind, p.ShowOrder}
 	var result sql.Result
 	var e error
 	if p.ID == 0 {
-		result, e = s.db.Exec("INSERT INTO plans(name,description,price,duration,quota,rules,group_id,enabled,rate_mbps,max_ips,max_connections,kind,show_order) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)", args...)
+		result, e = s.db.Exec("INSERT INTO plans(name,description,price,duration,quota,unlimited_traffic,rules,group_id,enabled,rate_mbps,max_ips,max_connections,kind,show_order) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?)", args...)
 		if e == nil {
 			p.ID, _ = result.LastInsertId()
 		}
 	} else {
-		result, e = s.db.Exec("UPDATE plans SET name=?,description=?,price=?,duration=?,quota=?,rules=?,group_id=?,enabled=?,rate_mbps=?,max_ips=?,max_connections=?,kind=?,show_order=? WHERE id=? AND archived=0", append(args, p.ID)...)
+		result, e = s.db.Exec("UPDATE plans SET name=?,description=?,price=?,duration=?,quota=?,unlimited_traffic=?,rules=?,group_id=?,enabled=?,rate_mbps=?,max_ips=?,max_connections=?,kind=?,show_order=? WHERE id=? AND archived=0", append(args, p.ID)...)
 	}
 	if e != nil {
 		dbFailure(w, e)
@@ -102,6 +106,17 @@ func normalizedPlanKind(value string) string {
 	}
 }
 
+func planExpiry(p Plan, start int64) int64 {
+	switch p.Kind {
+	case "month":
+		return time.Unix(start, 0).AddDate(0, int(p.Duration), 0).Unix()
+	case "traffic", "stack":
+		return 253402300799
+	default:
+		return start + p.Duration*86400
+	}
+}
+
 func planTerms(p Plan, existing, expires, oldQuota, oldUsed, now int64, renewing bool) (int64, int64, error) {
 	if existing != p.ID {
 		expires = now
@@ -110,22 +125,15 @@ func planTerms(p Plan, existing, expires, oldQuota, oldUsed, now int64, renewing
 	if renewing {
 		start = now
 	}
-	next := start + p.Duration*86400
 	quota := p.Quota
-	switch p.Kind {
-	case "month":
-		next = time.Unix(start, 0).AddDate(0, int(p.Duration), 0).Unix()
-	case "traffic", "stack":
-		next = 253402300799
-		if p.Kind == "stack" && existing == p.ID && expires > now && p.Quota > 0 {
-			left := max(0, oldQuota-oldUsed)
-			if left > int64(^uint64(0)>>1)-quota {
-				return 0, 0, errors.New("套餐流量超出可计量范围")
-			}
-			quota += left
+	if p.Kind == "stack" && existing == p.ID && expires > now && !p.UnlimitedTraffic && quota > 0 {
+		left := max(0, oldQuota-oldUsed)
+		if left > int64(^uint64(0)>>1)-quota {
+			return 0, 0, errors.New("套餐流量超出可计量范围")
 		}
+		quota += left
 	}
-	return next, quota, nil
+	return planExpiry(p, start), quota, nil
 }
 
 func purchase(tx *sql.Tx, id int64, p Plan, price int64, kind string) error {
@@ -139,10 +147,10 @@ func purchase(tx *sql.Tx, id int64, p Plan, price int64, kind string) error {
 	if e != nil {
 		return e
 	}
-	result, e := tx.Exec(`UPDATE users SET balance=balance-?,plan_id=?,expires=?,quota=?,used=0,billing_remainder=0,
+	result, e := tx.Exec(`UPDATE users SET balance=balance-?,plan_id=?,expires=?,quota=?,unlimited_traffic=?,used=0,billing_remainder=0,
 		quota_epoch=quota_epoch+1,max_rules=?,group_id=?,
 		auto_renew=CASE WHEN plan_id=0 AND auto_renew_configured=0 THEN 1 ELSE auto_renew END,
-		auto_renew_configured=1 WHERE id=? AND balance>=?`, price, p.ID, next, quota, p.Rules, p.GroupID, id, price)
+		auto_renew_configured=1 WHERE id=? AND balance>=?`, price, p.ID, next, quota, p.UnlimitedTraffic, p.Rules, p.GroupID, id, price)
 	if e != nil {
 		return e
 	}
@@ -230,7 +238,8 @@ func (s *Server) buyPlan(w http.ResponseWriter, r *http.Request, u User) {
 func (s *Server) renew() {
 	rows, e := s.db.Query(`SELECT u.id,u.plan_id FROM users u JOIN plans p ON p.id=u.plan_id
 		WHERE u.auto_renew=1 AND u.banned=0 AND u.plan_id>0 AND u.expires>0 AND p.archived=0 AND u.balance>=p.price
-		AND (u.expires<=unixepoch() OR (u.quota>0 AND u.used>=u.quota)) ORDER BY u.id LIMIT 100`)
+		AND (p.unlimited_traffic=1 OR p.quota>0)
+		AND (u.expires<=unixepoch() OR (u.unlimited_traffic=0 AND u.used>=u.quota)) ORDER BY u.id LIMIT 100`)
 	if e != nil {
 		return
 	}
@@ -247,9 +256,9 @@ func (s *Server) renew() {
 		if e != nil {
 			return
 		}
-		p, e := readPlan(tx.QueryRow("SELECT "+planColumns+` FROM plans p WHERE p.id=? AND p.archived=0
+		p, e := readPlan(tx.QueryRow("SELECT "+planColumns+` FROM plans p WHERE p.id=? AND p.archived=0 AND (p.unlimited_traffic=1 OR p.quota>0)
 			AND EXISTS(SELECT 1 FROM users u WHERE u.id=? AND u.auto_renew=1 AND u.banned=0
-			AND u.plan_id=p.id AND u.expires>0 AND u.balance>=p.price AND (u.expires<=unixepoch() OR (u.quota>0 AND u.used>=u.quota)))`, u[1], u[0]))
+			AND u.plan_id=p.id AND u.expires>0 AND u.balance>=p.price AND (u.expires<=unixepoch() OR (u.unlimited_traffic=0 AND u.used>=u.quota)))`, u[1], u[0]))
 		if e == nil && purchase(tx, u[0], p, p.Price, "renew") == nil {
 			_ = tx.Commit()
 		}
@@ -706,13 +715,21 @@ func (s *Server) users(w http.ResponseWriter, r *http.Request, u User) {
 			return
 		}
 		defer tx.Rollback()
+		if in.UnlimitedTraffic {
+			in.Quota = 0
+		}
 		if !in.Admin {
 			if e = clearUnauthorizedRuleRoutes(tx, in.Group, "u.id=? AND (u.group_id<>? OR u.admin=1)", id, in.Group); e != nil {
 				dbFailure(w, e)
 				return
 			}
 		}
-		result, e := tx.Exec("UPDATE users SET admin=?,banned=?,group_id=?,quota=?,max_rules=?,expires=?,note=?,rate_override=?,ips_override=?,connections_override=?,allow_device=? WHERE id=?", in.Admin, in.Banned, in.Group, in.Quota, in.MaxRules, in.Expires, in.Note, in.RateOverride, in.IPsOverride, in.ConnectionsOverride, in.AllowDevice, id)
+		adjustUsage := in.UsageAdjustment != nil && in.UsageAdjustment.To != in.UsageAdjustment.From
+		result, e := tx.Exec(`UPDATE users SET admin=?,banned=?,group_id=?,
+			quota_epoch=quota_epoch+CASE WHEN NOT ? AND (unlimited_traffic<>? OR quota<>?) THEN 1 ELSE 0 END,
+			quota=?,unlimited_traffic=?,max_rules=?,expires=?,note=?,rate_override=?,ips_override=?,connections_override=?,allow_device=? WHERE id=?`,
+			in.Admin, in.Banned, in.Group, adjustUsage, in.UnlimitedTraffic, in.Quota, in.Quota, in.UnlimitedTraffic,
+			in.MaxRules, in.Expires, in.Note, in.RateOverride, in.IPsOverride, in.ConnectionsOverride, in.AllowDevice, id)
 		if e != nil {
 			dbFailure(w, e)
 			return

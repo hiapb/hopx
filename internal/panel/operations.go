@@ -16,13 +16,13 @@ import (
 
 func (s *Server) assignUserPlan(w http.ResponseWriter, r *http.Request, _ User) {
 	var input struct {
-		PlanID                      int64
-		Quota, Group, Rules, Limits bool
+		PlanID                               int64
+		Quota, Group, Rules, Limits, Expires bool
 	}
 	if !decode(w, r, &input) {
 		return
 	}
-	if input.PlanID < 0 || (input.PlanID == 0 && (input.Quota || input.Group || input.Rules || input.Limits)) {
+	if input.PlanID < 0 || (input.PlanID == 0 && (input.Quota || input.Group || input.Rules || input.Limits || input.Expires)) {
 		fail(w, 400, "请选择用于同步额度的套餐")
 		return
 	}
@@ -32,9 +32,9 @@ func (s *Server) assignUserPlan(w http.ResponseWriter, r *http.Request, _ User) 
 		return
 	}
 	defer tx.Rollback()
-	var quota, group, maxRules int64
+	var plan Plan
 	if input.PlanID > 0 {
-		err = tx.QueryRow("SELECT quota,group_id,rules FROM plans WHERE id=? AND archived=0", input.PlanID).Scan(&quota, &group, &maxRules)
+		plan, err = readPlan(tx.QueryRow("SELECT "+planColumns+" FROM plans WHERE id=? AND archived=0", input.PlanID))
 		if errors.Is(err, sql.ErrNoRows) {
 			fail(w, 404, "套餐不存在")
 			return
@@ -44,12 +44,14 @@ func (s *Server) assignUserPlan(w http.ResponseWriter, r *http.Request, _ User) 
 		}
 	}
 	if input.Group {
-		if err = clearUnauthorizedRuleRoutes(tx, group, "u.id=? AND u.admin=0 AND u.group_id<>?", pathID(r), group); err != nil {
+		if err = clearUnauthorizedRuleRoutes(tx, plan.GroupID, "u.id=? AND u.admin=0 AND u.group_id<>?", pathID(r), plan.GroupID); err != nil {
 			dbFailure(w, err)
 			return
 		}
 	}
 	result, err := tx.Exec(`UPDATE users SET plan_id=?1, quota=CASE WHEN ? THEN ? ELSE quota END,
+		unlimited_traffic=CASE WHEN ? THEN ? ELSE unlimited_traffic END,
+		expires=CASE WHEN ? THEN ? ELSE expires END,
 		used=CASE WHEN ? THEN 0 ELSE used END, billing_remainder=CASE WHEN ? THEN 0 ELSE billing_remainder END,
 		quota_epoch=quota_epoch+CASE WHEN ? THEN 1 ELSE 0 END,
 		max_rules=CASE WHEN ? THEN ? ELSE max_rules END, group_id=CASE WHEN ? THEN ? ELSE group_id END,
@@ -57,7 +59,8 @@ func (s *Server) assignUserPlan(w http.ResponseWriter, r *http.Request, _ User) 
 		connections_override=CASE WHEN ? THEN NULL ELSE connections_override END,
 		auto_renew=CASE WHEN ?1>0 AND plan_id=0 AND auto_renew_configured=0 THEN 1 ELSE auto_renew END,
 		auto_renew_configured=CASE WHEN ?1>0 OR plan_id>0 THEN 1 ELSE auto_renew_configured END WHERE id=?`,
-		input.PlanID, input.Quota, quota, input.Quota, input.Quota, input.Quota, input.Rules, maxRules, input.Group, group, input.Limits, input.Limits, input.Limits, pathID(r))
+		input.PlanID, input.Quota, plan.Quota, input.Quota, plan.UnlimitedTraffic, input.Expires, planExpiry(plan, time.Now().Unix()),
+		input.Quota, input.Quota, input.Quota, input.Rules, plan.Rules, input.Group, plan.GroupID, input.Limits, input.Limits, input.Limits, pathID(r))
 	if err != nil {
 		dbFailure(w, err)
 		return

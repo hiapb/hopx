@@ -103,7 +103,7 @@ func TestTrafficAttributionAndQuota(t *testing.T) {
 		t.Fatalf("dashboard stats: %s (%v)", recorder.Body.String(), err)
 	}
 
-	if _, err = s.db.Exec("UPDATE users SET used=0,quota=1200,expires=unixepoch()+600 WHERE id=1"); err != nil {
+	if _, err = s.db.Exec("UPDATE users SET used=0,quota=1200,unlimited_traffic=0,expires=unixepoch()+600 WHERE id=1"); err != nil {
 		t.Fatal(err)
 	}
 	rule.QuotaManaged = true

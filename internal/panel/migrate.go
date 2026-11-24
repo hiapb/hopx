@@ -185,7 +185,7 @@ func applySnapshot(tx *sql.Tx, in snapshot, adminName, adminPassword string, rep
 		if u.Invite == "" {
 			u.Invite = token()[:16]
 		}
-		_, e := tx.Exec("INSERT INTO users(id,name,password,admin,banned,group_id,quota,used,balance,expires,max_rules,plan_id,invite,auto_renew,note,rate_override,ips_override,connections_override,affiliate_balance,allow_device) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)", u.ID, u.Name, []byte(u.PasswordHash), u.Admin, u.Banned, u.Group, u.Quota, u.Used, u.Balance, u.Expires, u.MaxRules, u.PlanID, u.Invite, u.AutoRenew, u.Note, u.RateOverride, u.IPsOverride, u.ConnectionsOverride, u.AffiliateBalance, u.AllowDevice)
+		_, e := tx.Exec("INSERT INTO users(id,name,password,admin,banned,group_id,quota,unlimited_traffic,used,balance,expires,max_rules,plan_id,invite,auto_renew,note,rate_override,ips_override,connections_override,affiliate_balance,allow_device) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)", u.ID, u.Name, []byte(u.PasswordHash), u.Admin, u.Banned, u.Group, u.Quota, u.UnlimitedTraffic, u.Used, u.Balance, u.Expires, u.MaxRules, u.PlanID, u.Invite, u.AutoRenew, u.Note, u.RateOverride, u.IPsOverride, u.ConnectionsOverride, u.AffiliateBalance, u.AllowDevice)
 		if e != nil {
 			return fmt.Errorf("用户 %d 无法导入: %w", u.ID, e)
 		}
@@ -247,7 +247,7 @@ func applySnapshot(tx *sql.Tx, in snapshot, adminName, adminPassword string, rep
 		if p.ID <= 0 || p.Duration <= 0 || p.Price < 0 || p.Quota < 0 || p.Rules < 0 {
 			return fmt.Errorf("无效套餐 %d", p.ID)
 		}
-		if _, e := tx.Exec("INSERT INTO plans(id,name,description,price,duration,quota,rules,group_id,enabled,rate_mbps,max_ips,max_connections,kind) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)", p.ID, p.Name, p.Description, p.Price, p.Duration, p.Quota, p.Rules, p.GroupID, p.Enabled, p.RateMbps, p.MaxIPs, p.MaxConnections, normalizedPlanKind(p.Kind)); e != nil {
+		if _, e := tx.Exec("INSERT INTO plans(id,name,description,price,duration,quota,unlimited_traffic,rules,group_id,enabled,rate_mbps,max_ips,max_connections,kind) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?)", p.ID, p.Name, p.Description, p.Price, p.Duration, p.Quota, p.UnlimitedTraffic, p.Rules, p.GroupID, p.Enabled, p.RateMbps, p.MaxIPs, p.MaxConnections, normalizedPlanKind(p.Kind)); e != nil {
 			return e
 		}
 	}

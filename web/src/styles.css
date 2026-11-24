@@ -13,6 +13,7 @@
   --canvas: rgba(252, 253, 249, 0.9);
   --rail: rgba(248, 250, 246, 0.98);
   --subtle: rgba(242, 247, 239, 0.98);
+  --dialog-surface: #fcfdf9;
   --text: #23342d;
   --muted: #637a71;
   --line: rgba(145, 163, 150, 0.22);
@@ -36,6 +37,7 @@
   --canvas: #15191f;
   --rail: #101419;
   --subtle: #1c222a;
+  --dialog-surface: #191e25;
   --text: #e8edf4;
   --muted: #aab5c4;
   --line: #2a333f;
@@ -545,10 +547,6 @@ button:focus-visible, a:focus-visible { outline: 2px solid var(--accent); outlin
 .details-grid, .equipment-editor { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 12px 18px; }
 .equipment-editor { gap: 0 18px; }
 .equipment-editor .field-wide, .rule-editor .field-wide { grid-column: 1 / -1; }
-.user-editor .ant-form-item { margin-bottom: 0; padding: 9px 0; border-bottom: 1px solid var(--line); }
-.user-editor .ant-form-item:last-child { border-bottom: 0; }
-.user-editor .ant-form-item-row { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 55%); align-items: start; gap: 8px; }
-.user-editor .ant-form-item-label { padding: 5px 0 0; white-space: normal; }
 .editor-section { margin-top: 4px; padding-top: 14px; border-top: 1px solid var(--line); }
 .editor-section h3 { margin: 0 0 10px; color: var(--text); font-size: 14px; font-weight: 670; }
 .editor-disclosure.ant-btn {
@@ -747,10 +745,10 @@ button:focus-visible, a:focus-visible { outline: 2px solid var(--accent); outlin
   max-height: calc(100dvh - 2 * var(--dialog-gutter));
   padding: 0;
   border: 1px solid var(--line);
-  background: var(--canvas);
-  box-shadow: 0 16px 48px #101b2a30, 0 4px 12px #101b2a1a;
+  border-radius: 16px;
+  background: var(--dialog-surface);
+  box-shadow: 0 20px 64px #101b2a36, 0 4px 14px #101b2a1a;
 }
-:root:not([data-theme="dark"]) .ant-modal .ant-modal-content { background: var(--rail); }
 .ant-modal .ant-modal-header {
   flex: none;
   padding: 16px calc(var(--dialog-padding) + 36px) 16px var(--dialog-padding);
@@ -759,6 +757,7 @@ button:focus-visible, a:focus-visible { outline: 2px solid var(--accent); outlin
   background: transparent;
 }
 .ant-modal .ant-modal-title, .ant-modal-confirm-content { overflow-wrap: anywhere; }
+.ant-modal .ant-modal-title { font-size: 17px; font-weight: 670; }
 .ant-modal .ant-modal-close { inset-block-start: 12px; inset-inline-end: 13px; }
 .ant-modal .ant-modal-body {
   min-height: 0;
@@ -782,6 +781,10 @@ button:focus-visible, a:focus-visible { outline: 2px solid var(--accent); outlin
 }
 .ant-modal .ant-modal-footer > .ant-btn + .ant-btn,
 .ant-modal-confirm .ant-modal-confirm-btns > .ant-btn + .ant-btn { margin-inline-start: 0; }
+.ant-modal .ant-modal-footer > .ant-btn, .ant-modal-confirm .ant-modal-confirm-btns > .ant-btn {
+  min-width: 76px;
+  min-height: 36px;
+}
 .ant-modal.ant-modal-confirm .ant-modal-body {
   display: flex;
   overflow: hidden;
@@ -808,6 +811,76 @@ button:focus-visible, a:focus-visible { outline: 2px solid var(--accent); outlin
 .ant-modal .ant-form > .ant-form-item:last-child { margin-bottom: 0; }
 .ant-modal .rule-editor .details-grid { row-gap: 0; }
 .ant-modal .advanced-toggle.ant-btn { gap: 5px; }
+.quota-editor {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  align-items: start;
+  gap: 16px;
+  margin-bottom: 16px;
+  padding: 12px 14px;
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  background: var(--subtle);
+}
+.quota-editor .ant-form-item, .plan-sync-options .ant-form-item { margin-bottom: 0; }
+.quota-editor .ant-form-item-extra, .plan-sync-options .ant-form-item-extra {
+  min-height: 0;
+  margin-top: 4px;
+  color: var(--muted);
+  font-size: 12px;
+  line-height: 1.5;
+}
+.editor-toggle-grid { grid-template-columns: repeat(3, minmax(0, 1fr)); }
+.plan-sync-options {
+  display: grid;
+  padding: 0 14px;
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  background: var(--subtle);
+}
+.plan-sync-options .ant-form-item { padding-block: 9px; }
+.plan-sync-options .ant-form-item + .ant-form-item { border-top: 1px solid var(--line); }
+.plan-sync-options .ant-form-item-control-input { min-height: 24px; }
+.plan-sync-options .ant-form-item-extra { padding-inline-start: 24px; }
+.renewal-payment {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr) minmax(0, 42%);
+  align-items: center;
+  gap: 11px;
+  padding: 13px;
+  border: 1px solid var(--line);
+  border-radius: 12px;
+  background: var(--subtle);
+}
+.renewal-icon {
+  display: grid;
+  place-items: center;
+  width: 36px;
+  height: 36px;
+  border-radius: 9px;
+  background: var(--active);
+  color: var(--text);
+}
+.renewal-payment .muted { display: block; font-size: 12px; }
+.renewal-payment strong { display: block; margin-top: 3px; line-height: 1.3; overflow-wrap: anywhere; }
+.renewal-price { text-align: end; }
+.renewal-price strong { font-size: clamp(18px, 4.8vw, 24px); font-variant-numeric: tabular-nums; }
+.renewal-details { margin: 10px 0 0; }
+.renewal-details > div {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(0, 58%);
+  align-items: baseline;
+  gap: 8px;
+  padding-block: 9px;
+}
+.renewal-details > div + div { border-top: 1px solid var(--line); }
+.renewal-details dt { color: var(--muted); }
+.renewal-details dd { margin: 0; text-align: end; font-weight: 600; font-variant-numeric: tabular-nums; overflow-wrap: anywhere; }
+.renewal-modal .ant-alert { margin-top: 10px; }
+@media (max-width: 420px) {
+  .renewal-payment { grid-template-columns: minmax(0, 1fr) minmax(0, 49%); }
+  .renewal-icon { display: none; }
+}
 .ant-drawer .ant-drawer-title { overflow-wrap: anywhere; }
 .ant-drawer .ant-drawer-body { overscroll-behavior: contain; }
 .ant-drawer .ant-drawer-header { background: var(--subtle); border-bottom-color: var(--line); }
@@ -1010,6 +1083,7 @@ button:focus-visible, a:focus-visible { outline: 2px solid var(--accent); outlin
 }
 @media (max-width: 490px) {
   .equipment-editor, .rule-editor .details-grid { grid-template-columns: 1fr; gap: 0; }
+  .editor-toggle-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 0 12px; }
   .rule-summary > div:not(:last-child) { margin-inline-end: 9px; padding-inline-end: 9px; }
 }
 

@@ -57,15 +57,15 @@ func testRequest(t *testing.T, client *http.Client, method, url string, headers 
 func subscribeTestAdmin(t *testing.T, client *http.Client, base string) {
 	t.Helper()
 	var plan Plan
-	testRequest(t, client, "POST", base+"/admin/plans", nil, Plan{Name: "Test plan", Duration: 30, Enabled: true}, 200, &plan)
+	testRequest(t, client, "POST", base+"/admin/plans", nil, Plan{Name: "Test plan", Duration: 30, Enabled: true, UnlimitedTraffic: true}, 200, &plan)
 	testRequest(t, client, "POST", fmt.Sprintf("%s/plans/%d/buy", base, plan.ID), nil, nil, 204, nil)
 }
 
 func giveFixtureUsersActivePlan(t *testing.T, panel *Server) {
 	t.Helper()
 	_, err := panel.db.Exec(`
-		INSERT INTO plans(id,name,description,price,duration,quota,rules,group_id) VALUES (1,'Fixture','',0,1,0,0,0);
-		UPDATE users SET plan_id=1,expires=unixepoch()+86400;
+		INSERT INTO plans(id,name,description,price,duration,quota,unlimited_traffic,rules,group_id) VALUES (1,'Fixture','',0,1,0,1,0,0);
+		UPDATE users SET plan_id=1,expires=unixepoch()+86400,unlimited_traffic=1;
 	`)
 	if err != nil {
 		t.Fatal(err)
@@ -448,7 +448,7 @@ func TestQuotaReservationsAcrossNodes(t *testing.T) {
 	}
 	defer s.Close()
 	giveFixtureUsersActivePlan(t, s)
-	if _, err = s.db.Exec("UPDATE users SET quota=100,expires=unixepoch()+600 WHERE id=1"); err != nil {
+	if _, err = s.db.Exec("UPDATE users SET quota=100,unlimited_traffic=0,expires=unixepoch()+600 WHERE id=1"); err != nil {
 		t.Fatal(err)
 	}
 	rules := []wire.Forward{{Rule: wire.Rule{Owner: 1}, QuotaManaged: true}}

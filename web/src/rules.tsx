@@ -592,7 +592,7 @@ export default function Rules({ user, initialQuery, refreshUser, siteProbeInterv
         </Space>
       </header>
       {!owner && !adminSearch && <dl className="rule-summary">
-        <div><dt>流量</dt><dd>{bytes(user.used)} / {subscribed && user.quota === 0 ? "无限" : bytes(subscribed ? user.quota : 0)}</dd></div>
+        <div><dt>流量</dt><dd>{bytes(user.used)} / {subscribed && user.unlimitedTraffic ? "不限流量" : bytes(subscribed ? user.quota : 0)}</dd></div>
         <div><dt>到期</dt><dd>{planExpiryLabel(user)}</dd></div>
         <div><dt>规则数</dt><dd>{allRules.value.total} / {ruleLimitLabel(user)}</dd></div>
       </dl>}

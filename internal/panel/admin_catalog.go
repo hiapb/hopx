@@ -24,11 +24,11 @@ func (s *Server) archivePlan(w http.ResponseWriter, r *http.Request, _ User) {
 }
 
 func (s *Server) pushPlan(w http.ResponseWriter, r *http.Request, _ User) {
-	var input struct{ Quota, Group, Rules, Limits bool }
+	var input struct{ Quota, Group, Rules, Limits, Expires bool }
 	if !decode(w, r, &input) {
 		return
 	}
-	if !input.Quota && !input.Group && !input.Rules && !input.Limits {
+	if !input.Quota && !input.Group && !input.Rules && !input.Limits && !input.Expires {
 		fail(w, 400, "请选择要更新的属性")
 		return
 	}
@@ -54,12 +54,15 @@ func (s *Server) pushPlan(w http.ResponseWriter, r *http.Request, _ User) {
 		}
 	}
 	result, err := tx.Exec(`UPDATE users SET quota=CASE WHEN ? THEN ? ELSE quota END,
+		unlimited_traffic=CASE WHEN ? THEN ? ELSE unlimited_traffic END,
+		expires=CASE WHEN ? THEN ? ELSE expires END,
 		quota_epoch=quota_epoch+CASE WHEN ? THEN 1 ELSE 0 END,
 		max_rules=CASE WHEN ? THEN ? ELSE max_rules END, group_id=CASE WHEN ? THEN ? ELSE group_id END,
 		rate_override=CASE WHEN ? THEN NULL ELSE rate_override END,
 		ips_override=CASE WHEN ? THEN NULL ELSE ips_override END,
 		connections_override=CASE WHEN ? THEN NULL ELSE connections_override END WHERE plan_id=?`,
-		input.Quota, plan.Quota, input.Quota, input.Rules, plan.Rules, input.Group, plan.GroupID,
+		input.Quota, plan.Quota, input.Quota, plan.UnlimitedTraffic, input.Expires, planExpiry(plan, time.Now().Unix()),
+		input.Quota, input.Rules, plan.Rules, input.Group, plan.GroupID,
 		input.Limits, input.Limits, input.Limits, plan.ID)
 	if err == nil {
 		err = tx.Commit()

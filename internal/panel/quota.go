@@ -119,7 +119,7 @@ func nextGrant(tx *sql.Tx, node, owner, epoch int64, generation string, now, win
 	}
 	var quota, used, remainder, expires int64
 	e = tx.QueryRow("SELECT quota,used,billing_remainder,expires FROM users u WHERE id=? AND quota_epoch=? AND "+
-		ruleServiceActiveSQL, owner, epoch).Scan(&quota, &used, &remainder, &expires)
+		ruleServiceActiveSQL+" AND u.unlimited_traffic=0", owner, epoch).Scan(&quota, &used, &remainder, &expires)
 	if e == sql.ErrNoRows {
 		return wire.QuotaGrant{}, nil
 	}

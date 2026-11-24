@@ -434,7 +434,7 @@ const ruleServiceBlockSQL = `CASE
 	WHEN u.banned=1 THEN '账号已封禁'
 	WHEN u.plan_id<=0 OR NOT EXISTS(SELECT 1 FROM plans WHERE id=u.plan_id) THEN '请先订购套餐'
 	WHEN u.expires<=unixepoch() THEN '套餐已到期，请续费'
-	WHEN u.quota>0 AND u.used>=u.quota THEN '套餐流量已用完，请续费'
+	WHEN u.unlimited_traffic=0 AND u.used>=u.quota THEN '套餐流量已用完，请续费'
 	ELSE '' END`
 
 const ruleServiceActiveSQL = "(" + ruleServiceBlockSQL + ")=''"

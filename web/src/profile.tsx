@@ -1,50 +1,60 @@
 import { useState } from "react";
-import { Alert, App, Button, Descriptions, Form, Input, InputNumber, Progress, Space, Switch, Typography } from "antd";
+import { Alert, App, Button, Descriptions, Form, Input, InputNumber, Modal, Progress, Space, Switch, Typography } from "antd";
+import { Wallet } from "lucide-react";
 import { api, bytes, currency, date, hasPlan, planExpiryLabel, ruleLimitLabel, useData } from "./api";
 import type { Site, User } from "./api";
 import RefreshButton from "./refresh-button";
 import { useConfirmAction } from "./confirm-action";
 
-type Renewal = { planId: number; name: string; kind: string; price: number; expires: number; nextExpires: number; quota: number; balance: number; epoch: number };
+type Renewal = { planId: number; name: string; price: number; expires: number; nextExpires: number; quota: number; unlimitedTraffic: boolean; balance: number; epoch: number };
+const renewalDate = (expires: number) => expires >= 253402300799 ? "不限期" : expires > 0 ? date(expires) : "未设置";
 
 export default function Profile({ user, site, refresh }: { user: User; site: Site; refresh: () => Promise<void> }) {
   const { message } = App.useApp();
   const confirmAction = useConfirmAction();
   const [working, setWorking] = useState(false);
   const [quoting, setQuoting] = useState(false);
+  const [renewal, setRenewal] = useState<Renewal>();
+  const [renewing, setRenewing] = useState(false);
+  const [renewalError, setRenewalError] = useState("");
   const [showPassword, setShowPassword] = useState(false);
   const [password] = Form.useForm();
   const [telegramLink, setTelegramLink] = useState("");
   const telegram = useData<{ available: boolean; linked: boolean; enabled: boolean; income: boolean; updown: boolean }>("/telegram", { available: false, linked: false, enabled: false, income: false, updown: false });
   const plan = user.service;
   const subscribed = hasPlan(user);
+  const showShop = user.admin || site.showShop !== "false";
+  const shortfall = renewal ? Math.max(0, renewal.price - renewal.balance) : 0;
   const inviteLink = location.origin + location.pathname + "#/register/" + encodeURIComponent(user.invite);
 
   async function previewRenewal() {
     setQuoting(true);
+    setRenewalError("");
     try {
-      const quote = await api<Renewal>("/me/renew");
-      confirmAction({
-        title: "立即续费",
-        okText: "确认续费",
-        okButtonProps: { disabled: quote.balance < quote.price },
-        content: <>
-          <Descriptions size="small" column={1} items={[
-            { key: "plan", label: "当前套餐", children: quote.name },
-            { key: "price", label: "余额支付", children: currency(quote.price) },
-            { key: "balance", label: "钱包余额", children: currency(quote.balance) },
-            { key: "expires", label: "当前有效期", children: date(quote.expires) },
-            { key: "next", label: "续费后有效期", children: ["traffic", "stack"].includes(quote.kind) ? "不限期" : date(quote.nextExpires) },
-            { key: "quota", label: "续费后可用流量", children: quote.quota ? bytes(quote.quota) : "无限" },
-          ]} />
-          {quote.price > quote.balance && <Alert type="warning" showIcon message="钱包余额不足" />}
-        </>,
-        onOk: () => action("/me/renew", "POST", { expectedPlan: quote.planId, expectedPrice: quote.price, expectedEpoch: quote.epoch }),
-      });
+      setRenewal(await api<Renewal>("/me/renew"));
     } catch (error) {
       message.error((error as Error).message);
     } finally {
       setQuoting(false);
+    }
+  }
+
+  async function confirmRenewal() {
+    if (!renewal || renewing || shortfall) return;
+    setRenewing(true);
+    setRenewalError("");
+    try {
+      await api("/me/renew", "POST", {
+        expectedPlan: renewal.planId, expectedPrice: renewal.price, expectedEpoch: renewal.epoch,
+        expectedQuota: renewal.quota, expectedUnlimitedTraffic: renewal.unlimitedTraffic,
+      });
+      setRenewal(undefined);
+      await refresh();
+      message.success("续费成功");
+    } catch (error) {
+      setRenewalError((error as Error).message);
+    } finally {
+      setRenewing(false);
     }
   }
 
@@ -106,7 +116,7 @@ export default function Profile({ user, site, refresh }: { user: User; site: Sit
         </div>
         <Space wrap>
           {(user.admin || site.showOrders !== "false") && <Button href="#/orders">我的订单</Button>}
-          {(user.admin || site.showShop !== "false") && <Button type="primary" href="#/shop">充值</Button>}
+          {showShop && <Button type="primary" href="#/shop">充值</Button>}
         </Space>
       </header>
       <div className="profile-grid">
@@ -114,8 +124,8 @@ export default function Profile({ user, site, refresh }: { user: User; site: Sit
           <h2 id="profile-service">套餐与流量</h2>
           {user.serviceBlock && <Alert className="alert-gap" type="info" showIcon message={user.serviceBlock} />}
           <div className="profile-usage">
-            <div><span>已用流量</span><strong>{bytes(user.used)} / {subscribed && user.quota === 0 ? "无限" : bytes(subscribed ? user.quota : 0)}</strong></div>
-            {subscribed && user.quota > 0 && <Progress percent={Math.min(100, Math.round(user.used / user.quota * 100))} />}
+            <div><span>已用流量</span><strong>{bytes(user.used)} / {subscribed && user.unlimitedTraffic ? "不限流量" : bytes(subscribed ? user.quota : 0)}</strong></div>
+            {subscribed && !user.unlimitedTraffic && user.quota > 0 && <Progress percent={Math.min(100, Math.round(user.used / user.quota * 100))} />}
           </div>
           <Descriptions size="small" layout="vertical" column={{ xs: 2, sm: 3 }} colon={false} items={[
             { key: "plan", label: "当前套餐", children: subscribed ? plan?.plan || "#" + user.planId : "未订购套餐" },
@@ -128,7 +138,7 @@ export default function Profile({ user, site, refresh }: { user: User; site: Sit
             ...(subscribed && plan?.plan ? [{ key: "renewPrice", label: "续费价格", children: currency(plan.renewPrice) }] : []),
           ]} />
           {subscribed ? <Button className="profile-commission" loading={quoting} onClick={() => void previewRenewal()}>立即续费</Button>
-            : (user.admin || site.showShop !== "false") && <Button className="profile-commission" href="#/shop">选购套餐</Button>}
+            : showShop && <Button className="profile-commission" href="#/shop">选购套餐</Button>}
         </section>
 
         <section className="profile-section" aria-labelledby="profile-wallet">
@@ -222,6 +232,29 @@ export default function Profile({ user, site, refresh }: { user: User; site: Sit
           </section>
         )}
       </div>
+      <Modal open={!!renewal} title="套餐续费" width={460} className="renewal-modal"
+        onCancel={() => { if (!renewing) setRenewal(undefined); }}
+        onOk={() => void confirmRenewal()} okText="确认续费" confirmLoading={renewing}
+        closable={!renewing} maskClosable={false} cancelButtonProps={{ disabled: renewing }}
+        okButtonProps={{ disabled: shortfall > 0 }}
+        footer={shortfall > 0 && showShop ? (_, { CancelBtn }) => <><CancelBtn /><Button type="primary" href="#/shop">前往充值</Button></> : undefined}
+      >
+        {renewal && <>
+          <div className="renewal-payment">
+            <span className="renewal-icon"><Wallet size={20} aria-hidden="true" /></span>
+            <div><span className="muted">当前套餐</span><strong>{renewal.name}</strong></div>
+            <div className="renewal-price"><span className="muted">应付金额</span><strong>{currency(renewal.price)}</strong></div>
+          </div>
+          <dl className="renewal-details">
+            <div><dt>钱包余额</dt><dd>{currency(renewal.balance)}</dd></div>
+            <div><dt>当前到期时间</dt><dd>{renewalDate(renewal.expires)}</dd></div>
+            <div><dt>续费后到期时间</dt><dd>{renewalDate(renewal.nextExpires)}</dd></div>
+            <div><dt>续费后流量配额</dt><dd>{renewal.unlimitedTraffic ? "不限流量" : bytes(renewal.quota)}</dd></div>
+          </dl>
+          {shortfall > 0 && <Alert type="warning" showIcon message={`钱包余额不足，还差 ${currency(shortfall)}`} />}
+          {renewalError && <Alert type="error" showIcon message={renewalError} />}
+        </>}
+      </Modal>
     </div>
   );
 }
