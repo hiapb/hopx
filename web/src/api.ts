@@ -134,6 +134,14 @@ export type Group = {
   userGroups?: number[];
   offlineSeconds: number;
 };
+export type NodeBandwidth = {
+  inMbps: number;
+  outMbps: number;
+  inBytes?: number;
+  outBytes?: number;
+  hasTotals?: boolean;
+};
+
 export type Node = {
   countryCode?: string;
   acceptHAProxy?: boolean;
@@ -159,12 +167,10 @@ export type Node = {
   online: boolean;
   applyError: string;
   updateError: string;
-  metrics: {
+  metrics: NodeBandwidth & {
     cpu: number;
     ram: number;
     disk: number;
-    inMbps: number;
-    outMbps: number;
     uptime: number;
     listeners: number;
     connections: number;

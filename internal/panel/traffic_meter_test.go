@@ -44,7 +44,8 @@ func TestTrafficAttributionAndQuota(t *testing.T) {
 			(3,'virtual','chain',10000,20000,500,0,30,'[4,2]'),(4,'relay','relay',10000,20000,4000,0,30,'[]');
 		INSERT INTO devices(id,group_id,token,registration) VALUES (1,1,'entry','{}'),(2,2,'exit','{}');
 		INSERT INTO rules(id,owner,entry,port,json) VALUES
-			(1,1,1,10001,'{"name":"rule","entry":1,"port":10001,"protocol":"tcp","enabled":true,"path":[3],"targets":["127.0.0.1:443"]}');
+			(1,1,1,10001,'{"name":"rule","entry":1,"port":10001,"protocol":"tcp","enabled":true,"path":[3],"targets":["127.0.0.1:443"]}'),
+			(2,1,2,10001,'{}');
 	`)
 	if err != nil {
 		t.Fatal(err)
@@ -62,7 +63,11 @@ func TestTrafficAttributionAndQuota(t *testing.T) {
 	if !ok || meter.Ratio != 500 || meter.VirtualGroup != 3 || rule.EntryRatio != 1500 || rule.Ratio != 2000 {
 		t.Fatalf("invalid virtual-chain billing: %+v, %+v", rule, meter)
 	}
-	entry := wire.Report{ID: "entry-batch", Traffic: []wire.Traffic{{RuleID: 1, In: 100, Out: 500, Ratio: 1500}}}
+	entry := wire.Report{ID: "entry-batch", Traffic: []wire.Traffic{
+		{RuleID: 1, In: 39, Out: 250, Ratio: 1500},
+		{RuleID: 2, In: 40, Out: 300, Ratio: 2000},
+		{RuleID: 1, In: 61, Out: 250, Ratio: 1500},
+	}}
 	exit := wire.Report{ID: "exit-batch", Traffic: []wire.Traffic{{ExitMeter: rule.ExitMeter, In: 80, Out: 400}}}
 	for range 2 {
 		for _, report := range []struct {
@@ -83,6 +88,7 @@ func TestTrafficAttributionAndQuota(t *testing.T) {
 	}{
 		{"SELECT used FROM users WHERE id=1", 1140},
 		{"SELECT inbound+outbound FROM traffic WHERE rule_id=1", 600},
+		{"SELECT count(*) FROM traffic WHERE rule_id=2", 0},
 		{"SELECT sum(inbound+outbound) FROM daily_user_traffic", 600},
 		{"SELECT inbound+outbound FROM daily_group_traffic WHERE group_id=1", 600},
 		{"SELECT inbound+outbound FROM daily_group_traffic WHERE group_id=2", 480},

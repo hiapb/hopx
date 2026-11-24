@@ -184,7 +184,10 @@ const ruleDiagnosticPageSize = 3
 
 type entryDiagnostic struct {
 	Number       int                   `json:"number"`
+	ID           int64                 `json:"id,omitempty"`
 	Name         string                `json:"name"`
+	Region       string                `json:"region,omitempty"`
+	CountryCode  string                `json:"countryCode,omitempty"`
 	Online       bool                  `json:"online"`
 	Status       string                `json:"status"`
 	ApplyError   string                `json:"applyError,omitempty"`
@@ -255,21 +258,29 @@ func (s *Server) diagnoseRule(w http.ResponseWriter, r *http.Request, u User) {
 	start := (page - 1) * ruleDiagnosticPageSize
 	end := min(start+ruleDiagnosticPageSize, len(devices))
 	results := make([]entryDiagnostic, end-start)
-	showName := group.Routing.StatusVisibility != "none" && (u.Admin || group.Owner == u.ID || (!group.HideStatus && s.setting("showNodeStatus", "true") != "false"))
+	showName := group.Routing.StatusVisibility != "none" && (u.Admin || group.Owner == u.ID ||
+		(!group.HideStatus && group.Routing.StatusVisibility != "admin" && s.setting("showNodeStatus", "true") != "false"))
 	var checks sync.WaitGroup
-	detailed := r.URL.Query().Get("detail") == "1"
+	query := r.URL.Query()
+	detailed, statusOnly := query.Get("detail") == "1", query.Get("status") == "1"
+	selected, _ := strconv.Atoi(query.Get("node"))
 	for i, device := range devices[start:end] {
-		name := fmt.Sprintf("入口 %d", start+i+1)
+		number := start + i + 1
+		out := &results[i]
+		*out = entryDiagnostic{Number: number, Name: fmt.Sprintf("入口 %d", number), Online: device.Online && !device.Revoked}
 		if showName {
-			name = device.Name
+			out.Name, out.ID, out.Region = device.Name, device.ID, device.Region
+			out.CountryCode = s.nodeCountry(device.Registration)
 		}
-		results[i] = entryDiagnostic{Number: start + i + 1, Name: name, Online: device.Online && !device.Revoked}
-		checks.Go(func() {
-			s.diagnoseEntry(r.Context(), device, rule.Enabled, compiled, detailed, id, config.Revision, &results[i])
-			if results[i].Status == "failed" && u.Admin {
-				results[i].ApplyError = device.ApplyError
-			}
-		})
+		out.Status = entryStatus(device, rule.Enabled, compiled, config.Revision)
+		if out.Status == "failed" && u.Admin {
+			out.ApplyError = device.ApplyError
+		}
+		if out.Status == "running" && !statusOnly && (!query.Has("node") || selected == number) {
+			checks.Go(func() {
+				s.diagnoseEntry(r.Context(), device, detailed, id, config.Revision, out)
+			})
+		}
 	}
 	checks.Wait()
 	respond(w, 200, map[string]any{
@@ -279,40 +290,45 @@ func (s *Server) diagnoseRule(w http.ResponseWriter, r *http.Request, u User) {
 	})
 }
 
-func (s *Server) diagnoseEntry(ctx context.Context, device wire.Device, enabled, compiled, detailed bool, ruleID int64, revision string, out *entryDiagnostic) {
+func entryStatus(device wire.Device, enabled, compiled bool, revision string) string {
 	switch {
 	case device.Revoked:
-		out.Status = "revoked"
+		return "revoked"
 	case !device.Online:
-		out.Status = "offline"
+		return "offline"
 	case !enabled:
-		out.Status = "paused"
+		return "paused"
 	case device.ApplyError != "":
-		out.Status = "failed"
+		return "failed"
 	case revision == "" || device.Revision != revision:
-		out.Status = "syncing"
+		return "syncing"
 	case !compiled:
-		out.Status = "inactive"
+		return "inactive"
 	case !device.AcceptRouteProbe:
-		out.Status = "upgrade"
+		return "upgrade"
 	default:
-		task := wire.DiagnosticTask{ID: token(), RuleID: ruleID, Revision: revision}
-		if detailed && device.AcceptLinkProbe {
-			task.ProbeSamples, task.ProbeOffset = 3, time.Now().Unix()
+		return "running"
+	}
+}
+
+func (s *Server) diagnoseEntry(ctx context.Context, device wire.Device, detailed bool, ruleID int64, revision string, out *entryDiagnostic) {
+	task := wire.DiagnosticTask{ID: token(), RuleID: ruleID, Revision: revision}
+	if detailed && device.AcceptLinkProbe {
+		task.ProbeSamples, task.ProbeOffset = 1, time.Now().Unix()
+	}
+	result, status := s.waitDiagnostic(ctx, device.ID, task)
+	switch status {
+	case http.StatusOK:
+		out.Status, out.Primary, out.Backup = result.RuleStatus, result.PrimaryRoute, result.BackupRoute
+		out.RecentRoutes = result.RecentRoutes
+		out.Links = boundedProbeLinks(result.Links, task.ProbeSamples)
+		if task.ProbeSamples > 0 {
+			s.saveRuleProbe(ctx, ruleID, out.Links)
 		}
-		result, status := s.waitDiagnostic(ctx, device.ID, task)
-		if status == http.StatusOK {
-			out.Status, out.Primary, out.Backup = result.RuleStatus, result.PrimaryRoute, result.BackupRoute
-			out.RecentRoutes = result.RecentRoutes
-			out.Links = boundedProbeLinks(result.Links, task.ProbeSamples)
-			if task.ProbeSamples > 0 {
-				s.saveRuleProbe(ctx, ruleID, out.Links)
-			}
-		} else if status == http.StatusTooManyRequests {
-			out.Status = "busy"
-		} else {
-			out.Status = "timeout"
-		}
+	case http.StatusTooManyRequests:
+		out.Status = "busy"
+	default:
+		out.Status = "timeout"
 	}
 }
 

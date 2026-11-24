@@ -19,7 +19,7 @@ func releaseFileAllowed(name string) bool {
 		return false
 	}
 	switch file {
-	case "node-amd64", "node-arm64", "verify-amd64", "verify-arm64", "install-amd64.txt", "install-arm64.txt":
+	case "node-amd64", "node-arm64", "verify-amd64", "verify-arm64", "install-amd64.txt", "install-arm64.txt", "haproxy-source.tar.gz":
 		return true
 	default:
 		return false

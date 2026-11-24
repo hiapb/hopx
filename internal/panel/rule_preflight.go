@@ -96,7 +96,7 @@ func (s *Server) checkNewRulePort(ctx context.Context, check wire.PortCheck, gro
 				case "occupied":
 					results <- outcome{http.StatusConflict, fmt.Errorf("%s的 %s 端口 %d 已被占用，请更换监听端口", source, strings.ToUpper(binding.Network), check.Port)}
 				case "no_haproxy":
-					results <- outcome{http.StatusConflict, fmt.Errorf("%s 尚未安装 HAProxy", source)}
+					results <- outcome{http.StatusConflict, fmt.Errorf("%s正在等待支持 HAProxy 的节点版本自动更新", source)}
 				default:
 					results <- outcome{http.StatusConflict, fmt.Errorf("%s 无法监听端口 %d", source, check.Port)}
 				}
@@ -188,7 +188,7 @@ func (s *Server) previewRule(r *http.Request, u User, rule *wire.Rule, group *wi
 		return 500, err
 	}
 	defer tx.Rollback()
-	if err = storeRule(tx, u, rule); err != nil {
+	if err = s.storeRule(tx, u, rule); err != nil {
 		return 400, err
 	}
 	if rule.Enabled {

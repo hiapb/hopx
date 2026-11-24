@@ -830,7 +830,7 @@ func validRule(tx *sql.Tx, u User, rule *wire.Rule) error {
 	return selectRulePort(tx, g, rule)
 }
 
-func storeRule(tx *sql.Tx, u User, rule *wire.Rule) error {
+func (s *Server) storeRule(tx *sql.Tx, u User, rule *wire.Rule) error {
 	if rule.ID == 0 {
 		if rule.RouteRepair != nil {
 			return errors.New(ruleRouteRepairMessage)
@@ -849,7 +849,19 @@ func storeRule(tx *sql.Tx, u User, rule *wire.Rule) error {
 			return err
 		}
 		if old.RouteRepair == nil && old.Enabled && rule.Enabled && old.UsesHAProxy() != rule.UsesHAProxy() {
-			return errors.New("请先暂停规则，等入口节点释放监听端口后再切换转发方式")
+			groups := []int64{old.Entry}
+			if rule.Entry != old.Entry {
+				groups = append(groups, rule.Entry)
+			}
+			for _, group := range groups {
+				ready, err := s.canSwitchHAProxy(tx, group, rule.UsesHAProxy())
+				if err != nil {
+					return err
+				}
+				if !ready {
+					return errors.New("入口节点正在等待新版转发生效，节点自动升级完成后即可在线切换")
+				}
+			}
 		}
 		if missing := old.RouteRepair; missing != nil && !rule.ConfirmRoute &&
 			((missing.Path && len(rule.Path) == 0 && !rule.TLSShared) || (missing.BackupPath && len(rule.BackupPath) == 0)) {
@@ -1023,7 +1035,7 @@ func (s *Server) saveRule(w http.ResponseWriter, r *http.Request, u User) {
 		return
 	}
 	defer tx.Rollback()
-	if e = storeRule(tx, u, &rule); e != nil {
+	if e = s.storeRule(tx, u, &rule); e != nil {
 		fail(w, 400, e.Error())
 		return
 	}
@@ -1134,7 +1146,7 @@ func (s *Server) batchRules(w http.ResponseWriter, r *http.Request, u User) {
 		})
 		for i := range input.Rules {
 			input.Rules[i].ID = 0
-			if e = storeRule(tx, u, &input.Rules[i]); e != nil {
+			if e = s.storeRule(tx, u, &input.Rules[i]); e != nil {
 				fail(w, 400, "第 "+strconv.Itoa(i+1)+" 条规则："+e.Error())
 				return
 			}
@@ -1158,7 +1170,7 @@ func (s *Server) batchRules(w http.ResponseWriter, r *http.Request, u User) {
 			switch input.Action {
 			case "reroute":
 				var rule wire.Rule
-				rule, e = rerouteRule(tx, u, id, input.Entry, input.Path, input.UpdatePath)
+				rule, e = s.rerouteRule(tx, u, id, input.Entry, input.Path, input.UpdatePath)
 				if e != nil {
 					fail(w, 400, "规则 #"+strconv.FormatInt(id, 10)+"："+e.Error())
 					return
@@ -1256,7 +1268,7 @@ func (s *Server) updateRulesByPort(w http.ResponseWriter, r *http.Request, u Use
 			fail(w, 400, prefix+err.Error())
 			return
 		}
-		if err = storeRule(tx, u, &rule); err != nil {
+		if err = s.storeRule(tx, u, &rule); err != nil {
 			fail(w, 400, prefix+err.Error())
 			return
 		}

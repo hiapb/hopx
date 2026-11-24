@@ -223,7 +223,8 @@ func (s *Server) deviceGroupSnapshot(forRouting bool, group int64) ([]wire.Devic
 		// Until the first new heartbeats arrive, use recent samples to preserve relay routes.
 		lastBucket = "coalesce((SELECT bucket FROM probe_samples WHERE node=d.id ORDER BY bucket DESC LIMIT 1),0)"
 	}
-	query := "SELECT d.id,d.group_id,d.registration,g.offline_seconds,d.last_seen,d.token LIKE 'revoked:%'," + lastBucket + " FROM devices d JOIN groups g ON g.id=d.group_id"
+	query := "SELECT d.id,d.group_id,d.registration,g.offline_seconds,d.last_seen,d.token LIKE 'revoked:%'," + lastBucket +
+		",d.in_bytes,d.out_bytes FROM devices d JOIN groups g ON g.id=d.group_id"
 	var args []any
 	if group != 0 {
 		query += " WHERE d.group_id=?"
@@ -242,10 +243,14 @@ func (s *Server) deviceGroupSnapshot(forRouting bool, group int64) ([]wire.Devic
 		var raw string
 		var timeout int
 		var revoked bool
-		if e = rows.Scan(&id, &group, &raw, &timeout, &lastSeen, &revoked, &last); e != nil {
+		var inbound, outbound sql.NullInt64
+		if e = rows.Scan(&id, &group, &raw, &timeout, &lastSeen, &revoked, &last, &inbound, &outbound); e != nil {
 			return nil, e
 		}
 		d := s.devices[id]
+		if !d.Metrics.HasTotals && inbound.Valid && outbound.Valid {
+			d.Metrics.InBytes, d.Metrics.OutBytes, d.Metrics.HasTotals = inbound.Int64, outbound.Int64, true
+		}
 		if e = json.Unmarshal([]byte(raw), &d.Registration); e != nil {
 			return nil, e
 		}
@@ -382,6 +387,9 @@ func (s *Server) visibleDevices(u User, equipmentGroup int64) ([]wire.Device, er
 		}
 	}
 	list := []wire.Device{}
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	currentTime := time.Now()
 	for _, d := range snapshot.devices {
 		g, ok := visible[d.GroupID]
 		if !ok || (equipmentGroup == 0 && (d.Revoked || (!d.Online && !d.LastSeen.IsZero() && d.LastSeen.Unix() <= expiry[d.GroupID]))) {
@@ -395,6 +403,10 @@ func (s *Server) visibleDevices(u User, equipmentGroup int64) ([]wire.Device, er
 		}
 		if !u.Admin || snapshot.settings["hideAdminIPs"] == "true" {
 			d.UpdateError, d.ApplyError, d.Revision, d.NativeUDPError, d.RelayModeError = "", "", "", "", ""
+		}
+		if live := s.nodeBandwidth[d.ID]; d.Online && live != nil && currentTime.Sub(live.at) < bandwidthFreshness &&
+			s.devices[d.ID].GroupID == d.GroupID {
+			d.Metrics.Bandwidth = live.metrics
 		}
 		list = append(list, d)
 	}
@@ -418,6 +430,7 @@ func (s *Server) pruneDeviceSessions() {
 		cutoff, registered := expiry[device.GroupID]
 		if !registered || (!device.LastSeen.IsZero() && device.LastSeen.Unix() <= cutoff) {
 			delete(s.devices, id)
+			s.clearNodeBandwidth(id)
 			delete(s.probeStored, id)
 			delete(s.diagnostics, id)
 		}
@@ -433,7 +446,7 @@ func (s *Server) listNodes(w http.ResponseWriter, r *http.Request, u User) {
 	respond(w, 200, list)
 }
 
-func (s *Server) events(w http.ResponseWriter, r *http.Request, u User) {
+func (s *Server) events(w http.ResponseWriter, r *http.Request, _ User) {
 	flusher, ok := w.(http.Flusher)
 	if !ok {
 		fail(w, 501, "实时订阅不可用")
@@ -441,39 +454,67 @@ func (s *Server) events(w http.ResponseWriter, r *http.Request, u User) {
 	}
 	w.Header().Set("Content-Type", "text/event-stream")
 	w.Header().Set("X-Accel-Buffering", "no")
-	tick := time.NewTicker(5 * time.Second)
+	tick := time.NewTicker(time.Second)
 	defer tick.Stop()
 	previous := make(map[int64]wire.Device)
-	for {
-		current, e := s.sessionUser(r)
-		if e != nil || current.Banned {
-			return
-		}
-		list, e := s.visibleNodes(current)
-		if e != nil {
-			return
-		}
-		next := make(map[int64]wire.Device, len(list))
-		updates := []wire.Device{}
-		for _, d := range list {
-			next[d.ID] = d
-			if d != previous[d.ID] {
-				updates = append(updates, d)
-			}
-		}
-		removed := []int64{}
+	defer func() {
+		removed := make([]int64, 0, len(previous))
 		for id := range previous {
-			if _, ok := next[id]; !ok {
-				removed = append(removed, id)
-			}
+			removed = append(removed, id)
 		}
-		raw, _ := json.Marshal(map[string]any{"items": updates, "removed": removed})
+		s.changeBandwidthViewers(nil, removed)
+	}()
+	var nextSnapshot time.Time
+	send := func(event string, payload any) bool {
+		raw, _ := json.Marshal(payload)
 		_ = http.NewResponseController(w).SetWriteDeadline(time.Now().Add(5 * time.Second))
-		if _, e = fmt.Fprintf(w, "data: %s\n\n", raw); e != nil {
-			return
+		if _, err := fmt.Fprintf(w, "%sdata: %s\n\n", event, raw); err != nil {
+			return false
 		}
 		flusher.Flush()
-		previous = next
+		return true
+	}
+	for {
+		now := time.Now()
+		if !now.Before(nextSnapshot) {
+			current, err := s.sessionUser(r)
+			if err != nil || current.Banned {
+				return
+			}
+			list, err := s.visibleNodes(current)
+			if err != nil {
+				return
+			}
+			next := make(map[int64]wire.Device, len(list))
+			updates := []wire.Device{}
+			var added []int64
+			for _, d := range list {
+				next[d.ID] = d
+				old, known := previous[d.ID]
+				if !known {
+					added = append(added, d.ID)
+				}
+				if d != old {
+					updates = append(updates, d)
+				}
+			}
+			removed := []int64{}
+			for id := range previous {
+				if _, kept := next[id]; !kept {
+					removed = append(removed, id)
+				}
+			}
+			s.changeBandwidthViewers(added, removed)
+			previous = next
+			if !send("", map[string]any{"items": updates, "removed": removed}) {
+				return
+			}
+			nextSnapshot = now.Add(5 * time.Second)
+		} else if changes := s.bandwidthUpdates(previous); len(changes) != 0 {
+			if !send("event: bandwidth\n", changes) {
+				return
+			}
+		}
 		select {
 		case <-r.Context().Done():
 			return
@@ -495,6 +536,7 @@ func (s *Server) deleteNode(w http.ResponseWriter, r *http.Request, u User) {
 	}
 	s.mu.Lock()
 	delete(s.devices, id)
+	s.clearNodeBandwidth(id)
 	delete(s.probeStored, id)
 	delete(s.diagnostics, id)
 	s.mu.Unlock()
@@ -876,6 +918,25 @@ func (s *Server) accountTraffic(node, group int64, report *wire.Report) (string,
 	if n, _ := status.RowsAffected(); n == 0 {
 		return report.ID, nil
 	}
+	var ingress [][3]int64
+	for _, t := range report.Traffic {
+		if t.In < 0 || t.Out < 0 || t.In > 1<<48 || t.Out > 1<<48 || t.Ratio < 0 || t.Ratio > 200000 {
+			return "", fmt.Errorf("流量条目无效")
+		}
+		if t.ExitMeter == "" {
+			if ingress == nil {
+				ingress = make([][3]int64, 0, len(report.Traffic))
+			}
+			ingress = append(ingress, [3]int64{t.RuleID, t.In, t.Out})
+		}
+	}
+	owners := make(map[int64]int64)
+	if len(ingress) > 8 {
+		owners = make(map[int64]int64, len(ingress))
+	}
+	if e = addIngressTraffic(tx, group, ingress, owners); e != nil {
+		return "", e
+	}
 	type transfer struct{ in, out int64 }
 	byOwner := make(map[int64]transfer)
 	byGroup := make(map[int64]transfer)
@@ -886,9 +947,6 @@ func (s *Server) accountTraffic(node, group int64, report *wire.Report) (string,
 		totals[id] = transfer{total.in + t.In, total.out + t.Out}
 	}
 	for _, t := range report.Traffic {
-		if t.In < 0 || t.Out < 0 || t.In > 1<<48 || t.Out > 1<<48 || t.Ratio < 0 || t.Ratio > 200000 {
-			return "", fmt.Errorf("流量条目无效")
-		}
 		if t.ExitMeter != "" {
 			meter, ok := wire.VerifyExitMeter(meterKey, t.ExitMeter, group)
 			if !ok {
@@ -908,16 +966,9 @@ func (s *Server) accountTraffic(node, group int64, report *wire.Report) (string,
 			}
 			continue
 		}
-		var owner int64
-		e = tx.QueryRow("SELECT owner FROM rules WHERE id=? AND entry=?", t.RuleID, group).Scan(&owner)
-		if e == sql.ErrNoRows {
+		owner, accepted := owners[t.RuleID]
+		if !accepted {
 			continue
-		}
-		if e != nil {
-			return "", e
-		}
-		if _, e = tx.Exec("INSERT INTO traffic(rule_id,inbound,outbound) VALUES(?,?,?) ON CONFLICT(rule_id) DO UPDATE SET inbound=inbound+excluded.inbound,outbound=outbound+excluded.outbound", t.RuleID, t.In, t.Out); e != nil {
-			return "", e
 		}
 		add(byOwner, owner, t)
 		add(byGroup, group, t)
@@ -958,6 +1009,49 @@ func (s *Server) accountTraffic(node, group int64, report *wire.Report) (string,
 		return "", e
 	}
 	return report.ID, nil
+}
+
+func addIngressTraffic(tx *sql.Tx, group int64, batch [][3]int64, owners map[int64]int64) error {
+	if len(batch) == 0 {
+		return nil
+	}
+	const insert = "INSERT INTO traffic(rule_id,inbound,outbound) "
+	const addTotals = ` ON CONFLICT(rule_id) DO UPDATE SET inbound=inbound+excluded.inbound,outbound=outbound+excluded.outbound
+		RETURNING rule_id,(SELECT owner FROM rules WHERE id=traffic.rule_id)`
+	if len(batch) == 1 {
+		row := batch[0]
+		var id, owner int64
+		err := tx.QueryRow(insert+"SELECT id,?,? FROM rules WHERE id=? AND entry=?"+addTotals, row[1], row[2], row[0], group).Scan(&id, &owner)
+		if err == sql.ErrNoRows {
+			return nil
+		}
+		if err != nil {
+			return err
+		}
+		owners[id] = owner
+		return nil
+	}
+	raw, err := json.Marshal(batch)
+	if err != nil {
+		return err
+	}
+	// Walk the report once and look up each rule by ID. Joining by group
+	// first makes SQLite rescan the report for every rule in a large group.
+	rows, err := tx.Query(insert+`SELECT r.id,json_extract(item.value,'$[1]'),json_extract(item.value,'$[2]')
+		FROM json_each(?) AS item CROSS JOIN rules r ON r.id=json_extract(item.value,'$[0]') WHERE r.entry=?`+addTotals,
+		string(raw), group)
+	if err != nil {
+		return err
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var id, owner int64
+		if err = rows.Scan(&id, &owner); err != nil {
+			return err
+		}
+		owners[id] = owner
+	}
+	return rows.Err()
 }
 
 func debitTraffic(tx *sql.Tx, owner, bytes, ratio, epoch int64) error {
@@ -1053,9 +1147,10 @@ func (s *Server) syncNode(w http.ResponseWriter, r *http.Request) {
 	var group int64
 	var raw, mode string
 	var nativeUDP, applyMode bool
+	credentialHash := digest(credential)
 	if s.db.QueryRow(`SELECT d.group_id,d.registration,g.relay_mode,coalesce(json_extract(g.routing,'$.nativeUDP'),0),
 		coalesce(json_extract(g.routing,'$.applyRelayMode'),0) FROM devices d JOIN groups g ON g.id=d.group_id
-		WHERE d.id=? AND d.token=?`, id, digest(credential)).Scan(&group, &raw, &mode, &nativeUDP, &applyMode) != nil {
+		WHERE d.id=? AND d.token=?`, id, credentialHash).Scan(&group, &raw, &mode, &nativeUDP, &applyMode) != nil {
 		fail(w, 401, "节点凭据无效")
 		return
 	}
@@ -1071,6 +1166,7 @@ func (s *Server) syncNode(w http.ResponseWriter, r *http.Request) {
 	d.AcceptRouteProbe = input.AcceptRouteProbe
 	d.AcceptLinkProbe = input.AcceptLinkProbe
 	d.AcceptHAProxy = input.AcceptHAProxy
+	d.AcceptHAProxyHandoff = input.AcceptHAProxyHandoff
 	d.AcceptPortCheck = input.AcceptPortCheck
 	d.AcceptExitMeter = input.AcceptExitMeter
 	d.AcceptScopedReverse = input.AcceptScopedReverse
@@ -1099,6 +1195,10 @@ func (s *Server) syncNode(w http.ResponseWriter, r *http.Request) {
 	s.mu.Lock()
 	scopingChanged := s.devices[id].AcceptScopedReverse != d.AcceptScopedReverse
 	s.devices[id] = d
+	bandwidth := s.nodeBandwidth[id]
+	if bandwidth != nil {
+		bandwidth.credential = credentialHash
+	}
 	bucket := d.LastSeen.Unix() / 60 * 60
 	needSample := s.probeStored[id] != bucket
 	if needSample {
@@ -1119,7 +1219,7 @@ func (s *Server) syncNode(w http.ResponseWriter, r *http.Request) {
 			s.mu.Unlock()
 		}
 	}
-	out := wire.Sync{EnableNativeUDP: nativeUDP}
+	out := wire.Sync{EnableNativeUDP: nativeUDP, LiveBandwidth: bandwidth != nil}
 	if input.AcceptExitMeter {
 		out.MeterKey, out.MeterGroup = s.meterKey.Public().(ed25519.PublicKey), group
 	}
@@ -1241,7 +1341,12 @@ func (s *Server) saveProbeSample(device wire.Device, bucket int64) error {
 	if _, err := tx.Exec("INSERT OR IGNORE INTO probe_samples(node,bucket,cpu,ram,disk,inbound,outbound) VALUES(?,?,?,?,?,?,?)", device.ID, bucket, metric.CPU, metric.RAM, metric.Disk, metric.InMbps, metric.OutMbps); err != nil {
 		return err
 	}
-	if _, err := tx.Exec("UPDATE devices SET last_seen=max(last_seen,?) WHERE id=?", device.LastSeen.Unix(), device.ID); err != nil {
+	var inbound, outbound any
+	if metric.HasTotals && metric.InBytes >= 0 && metric.OutBytes >= 0 {
+		inbound, outbound = metric.InBytes, metric.OutBytes
+	}
+	if _, err := tx.Exec(`UPDATE devices SET last_seen=max(last_seen,?),in_bytes=coalesce(?,in_bytes),out_bytes=coalesce(?,out_bytes)
+		WHERE id=?`, device.LastSeen.Unix(), inbound, outbound, device.ID); err != nil {
 		return err
 	}
 	return tx.Commit()

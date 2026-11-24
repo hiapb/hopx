@@ -72,7 +72,7 @@ const runtimeLabels: Record<string, { label: string; color: string }> = {
   offline: { label: "入口离线", color: "default" },
   syncing: { label: "等待同步", color: "processing" },
   failed: { label: "入口应用失败", color: "error" },
-  proxy_unavailable: { label: "入口未安装 HAProxy", color: "warning" },
+  proxy_unavailable: { label: "等待节点升级", color: "processing" },
   inactive: { label: "未下发", color: "warning" },
   route_repair: { label: "待重新选线", color: "warning" },
   subscription_blocked: { label: "转发已停用", color: "warning" },
@@ -949,12 +949,12 @@ export default function Rules({ user, initialQuery, refreshUser, siteProbeInterv
               options={exitOptions(chosenBulkEntry)} placeholder={requiresExit(chosenBulkEntry) ? "选择出口设备组" : "入口直出"} />
           </Form.Item>}
           <Form.Item name="targets" label="批量规则" rules={[{ required: true }]}>
-            <Input.TextArea rows={6} placeholder={"每行一条规则\n支持 host:port、nyanpass JSON、名称#监听端口#目标地址#目标端口"} />
+            <Input.TextArea className="dialog-code" spellCheck={false} rows={6} placeholder={"每行一条规则\n支持 host:port、nyanpass JSON、名称#监听端口#目标地址#目标端口"} />
           </Form.Item>
           <Button type="link" className="advanced-toggle" aria-expanded={bulkAdvanced} onClick={() => setBulkAdvanced(!bulkAdvanced)}>JSON 设置</Button>
           <div hidden={!bulkAdvanced}>
             <Form.Item name="options" label="共用规则配置" extra="填写 JSON 对象，覆盖每条规则中目标地址以外的字段。">
-              <Input.TextArea rows={4} placeholder={'{"dest_policy":"round"}'} />
+              <Input.TextArea className="dialog-code" spellCheck={false} rows={4} placeholder={'{"dest_policy":"round"}'} />
             </Form.Item>
           </div>
         </Form>
@@ -964,10 +964,10 @@ export default function Rules({ user, initialQuery, refreshUser, siteProbeInterv
           <Form.Item name="entry" label="切换入口"><Select allowClear options={entries} placeholder="留空保留现有入口" /></Form.Item>
           <Form.Item name="updatePath" label="同时切换出口" valuePropName="checked"><Switch /></Form.Item>
           <Form.Item name="path" label="新出口路径"><MultiSelect options={hops} placeholder="切换出口时留空表示直出" /></Form.Item>
-          <p className="muted">更换入口时会从目标设备组重新分配端口。</p>
+          <p className="dialog-note">更换入口时会从目标设备组重新分配端口。</p>
         </Form>
       </Modal>
-      {diagnosticRule && <RuleDiagnostics rule={diagnosticRule} describePath={describePath} onClose={() => setDiagnosticRule(undefined)} />}
+      {diagnosticRule && <RuleDiagnostics rule={diagnosticRule} entryName={names.get(diagnosticRule.entry)} describePath={describePath} onClose={() => setDiagnosticRule(undefined)} />}
       <Drawer open={!!addressRule} title="入口连接地址" onClose={() => setAddressRule(undefined)}>
         {addressRule && <Space direction="vertical" style={{width:"100%"}}>
           {connectionAddresses(addressRule).map((address, index) => <div className="connection-address" key={index}>
@@ -1025,12 +1025,12 @@ export default function Rules({ user, initialQuery, refreshUser, siteProbeInterv
           title="HAProxy 入口负载均衡"
           onCancel={() => { if (!proxyBusy) setProxyRule(null); }}
           footer={[
-            <Button key="generate" type="primary" loading={proxyBusy} onClick={() => proxyForm.submit()}>生成配置</Button>,
             <Button key="download" icon={<Download size={16} />} disabled={!proxyConfig} onClick={downloadProxy}>下载</Button>,
+            <Button key="generate" type="primary" loading={proxyBusy} onClick={() => proxyForm.submit()}>生成配置</Button>,
           ]}
           forceRender
         >
-          <p className="muted">
+          <p className="dialog-note">
             HAProxy 将 TCP 连接分配到健康的 HopX 入口节点。UDP 由 HopX 入口直接处理。
             入口节点端口为 {proxyRule?.tlsSharedPort || proxyRule?.port}。
           </p>
@@ -1042,7 +1042,7 @@ export default function Rules({ user, initialQuery, refreshUser, siteProbeInterv
               <Input.TextArea rows={3} placeholder={"每行一个 host:port\nIPv6 使用 [地址]:端口"} />
             </Form.Item>
           </Form>
-          {proxyConfig && <Input.TextArea className="mono" aria-label="HAProxy 配置" value={proxyConfig} readOnly rows={10} />}
+          {proxyConfig && <Input.TextArea className="dialog-code proxy-config-output" aria-label="HAProxy 配置" value={proxyConfig} readOnly rows={10} />}
         </Modal>
       )}
       <Modal
@@ -1092,7 +1092,7 @@ export default function Rules({ user, initialQuery, refreshUser, siteProbeInterv
               />
             </Form.Item>
             <Form.Item name="protocol" label="转发方式" className="field-wide" extra={usesHAProxy ?
-              "入口节点须安装 HAProxy。" : user.admin && editing?.id && editing.enabled ? "暂停规则后再切换内置转发和 HAProxy。" : undefined}>
+              <span className="rule-engine-note"><Network size={14} aria-hidden="true" />由入口节点按需启动 HAProxy，同节点的规则共用进程。</span> : undefined}>
               <Select options={[
                 { value: "inherit", label: "继承入口设备组" },
                 { value: "tcp", label: "TCP" },
@@ -1311,9 +1311,9 @@ export default function Rules({ user, initialQuery, refreshUser, siteProbeInterv
             onClick={() => setImporting(importing === "update" ? "create" : "update")}>
             {importing === "update" ? "切换为批量新增" : "切换为批量修改"}
           </Button>
-          {importing === "update" && <p className="muted alert-gap">按入口和监听端口匹配已有规则，只更新填写的配置项。</p>}
+          {importing === "update" && <p className="dialog-note">按入口和监听端口匹配已有规则，只更新填写的配置项。</p>}
           <Form.Item name="targets" label="规则内容" rules={[{ required: true }]}>
-            <Input.TextArea rows={10} placeholder={importing === "update"
+            <Input.TextArea className="dialog-code" spellCheck={false} rows={10} placeholder={importing === "update"
               ? '{"listen_port":12345,"dest":["example.com:443"]}'
               : "粘贴逐行规则或 HopX JSON 数组\n旧格式为 名称#监听端口#目标地址#目标端口"} />
           </Form.Item>
@@ -1329,8 +1329,10 @@ export default function Rules({ user, initialQuery, refreshUser, siteProbeInterv
           </>}
         </Form>
       </Modal>
-      <Modal open={!!copiedRules} title="批量导出" onCancel={() => setCopiedRules("")} footer={null}>
-        <Input.TextArea aria-label="规则导出内容" readOnly value={copiedRules} rows={10} onFocus={event => event.target.select()} />
+      <Modal open={!!copiedRules} title="批量导出" onCancel={() => setCopiedRules("")}
+        footer={<Button onClick={() => setCopiedRules("")}>关闭</Button>}>
+        <Input.TextArea className="dialog-code" aria-label="规则导出内容" readOnly value={copiedRules} rows={10}
+          onFocus={event => event.target.select()} />
       </Modal>
       <Modal open={!!folderEditor} title={folderEditor === "move" ? "移动分组" : folderEditor === "create" ? "新增分组" : "管理分组"}
         onCancel={() => setFolderEditor(undefined)} onOk={() => folderForm.submit()} okText="保存分组"

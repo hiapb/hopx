@@ -43,17 +43,7 @@ func (p *MuxPool) peer(hop wire.Hop) *muxPeer {
 		p.peers = make(map[wire.Hop]*muxPeer)
 	}
 	now := time.Now()
-	if now.After(p.sweep) {
-		p.sweep = now.Add(30 * time.Second)
-		for key, peer := range p.peers {
-			if peer.pins == 0 && now.Sub(peer.used) > 2*time.Minute && (peer.session == nil || peer.session.NumStreams() == 0) {
-				if peer.session != nil {
-					_ = peer.session.Close()
-				}
-				delete(p.peers, key)
-			}
-		}
-	}
+	p.sweepIdle(now)
 	peer := p.peers[hop]
 	if peer == nil && len(p.peers) < 32 {
 		peer = &muxPeer{gate: make(chan struct{}, 1)}
@@ -64,6 +54,27 @@ func (p *MuxPool) peer(hop wire.Hop) *muxPeer {
 		peer.used = now
 	}
 	return peer
+}
+
+func (p *MuxPool) SweepIdle() {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	p.sweepIdle(time.Now())
+}
+
+func (p *MuxPool) sweepIdle(now time.Time) {
+	if len(p.peers) == 0 || now.Before(p.sweep) {
+		return
+	}
+	p.sweep = now.Add(30 * time.Second)
+	for key, peer := range p.peers {
+		if peer.pins == 0 && now.Sub(peer.used) > 2*time.Minute && (peer.session == nil || peer.session.NumStreams() == 0) {
+			if peer.session != nil {
+				_ = peer.session.Close()
+			}
+			delete(p.peers, key)
+		}
+	}
 }
 
 func (p *MuxPool) Close() {

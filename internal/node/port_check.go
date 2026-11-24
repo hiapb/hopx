@@ -35,17 +35,14 @@ func (e *Engine) checkPort(ctx context.Context, task wire.DiagnosticTask) *wire.
 			address := net.JoinHostPort(host, strconv.Itoa(check.Port))
 			binding := wire.PortBinding{Network: network, Address: address, Status: "available"}
 			key := listenerKey{host: host, network: network, port: check.Port}
-			if proxy && e.proxy.binary == "" {
+			if proxy && !e.proxy.available() {
 				binding.Status = "no_haproxy"
 			} else if existing := e.listeners[key]; existing != nil {
-				if proxy || existing.route.Load().rule.ID != task.RuleID {
+				if existing.route.Load().rule.ID != task.RuleID {
 					binding.Status = "occupied"
 				} else {
 					binding.Status = "in_use_by_rule"
 				}
-			} else if active := e.activeRules[task.RuleID]; proxy && active != nil &&
-				active.rule.HAProxy && active.rule.Port == check.Port && e.proxy.active.running() {
-				binding.Status = "in_use_by_rule"
 			} else {
 				var socket interface{ Close() error }
 				var err error

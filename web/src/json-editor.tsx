@@ -31,6 +31,6 @@ export default function JsonEditor({
 
   return <Modal open title={title} onCancel={onClose} onOk={save} okText="保存" width={720} confirmLoading={saving}>
     {error && <Alert className="alert-gap" type="error" showIcon message={error} />}
-    <Input.TextArea aria-label="JSON 配置" className="mono" rows={17} spellCheck={false} value={text} onChange={(event) => setText(event.target.value)} />
+    <Input.TextArea aria-label="JSON 配置" className="dialog-code" rows={17} spellCheck={false} value={text} onChange={(event) => setText(event.target.value)} />
   </Modal>;
 }

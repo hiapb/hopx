@@ -175,9 +175,10 @@ type listenerKey struct {
 }
 
 type listener struct {
-	tcp   net.Listener
-	udp   *net.UDPConn
-	route atomic.Pointer[ruleRuntime]
+	tcp     net.Listener
+	udp     *net.UDPConn
+	route   atomic.Pointer[ruleRuntime]
+	tcpDone chan struct{}
 }
 
 func (l *listener) close() {
@@ -448,6 +449,9 @@ func (e *Engine) revokeMissingRules(rules []wire.Forward) bool {
 	}
 	if e.proxy.active.running() {
 		e.proxy.listeners = len(e.proxy.active.frontends) * len(e.bind)
+		if e.proxy.listeners == 0 {
+			e.proxy.active.drain()
+		}
 	} else {
 		e.proxy.listeners = 0
 	}
@@ -471,13 +475,16 @@ func (e *Engine) apply(ctx context.Context, c wire.Config, save, invalidateCache
 	if c.Revision == e.applied {
 		return nil
 	}
+	if save == nil {
+		save = func() error { return nil }
+	}
 	if e.revokeMissingRules(c.Rules) && invalidateCache != nil {
 		if err := invalidateCache(); err != nil {
 			return fmt.Errorf("remove revoked rules from cache: %w", err)
 		}
 	}
 	next := map[listenerKey]*ruleRuntime{}
-	proxyRules := make([]proxyRule, 0)
+	var proxyRules []proxyRule
 	newCounters := make(map[countKey]*counter)
 	users := make(map[int64]*admission)
 	rules := make(map[int64]*admission)
@@ -536,9 +543,6 @@ func (e *Engine) apply(ctx context.Context, c wire.Config, save, invalidateCache
 			continue
 		}
 		for _, network := range []string{"tcp", "udp"} {
-			if f.HAProxy && network == "tcp" {
-				continue
-			}
 			if f.Protocol != network && f.Protocol != "both" {
 				continue
 			}
@@ -558,9 +562,8 @@ func (e *Engine) apply(ctx context.Context, c wire.Config, save, invalidateCache
 	if err := attachSharedRoutes(candidates); err != nil {
 		return err
 	}
-	proxyListeners := len(proxyRules) * len(e.bind)
-	if len(next)+proxyListeners > e.maxListeners {
-		return fmt.Errorf("requested %d listeners, limit %d", len(next)+proxyListeners, e.maxListeners)
+	if len(next) > e.maxListeners {
+		return fmt.Errorf("requested %d listeners, limit %d", len(next), e.maxListeners)
 	}
 	needed := len(e.listeners)
 	for key := range next {
@@ -568,22 +571,15 @@ func (e *Engine) apply(ctx context.Context, c wire.Config, save, invalidateCache
 			needed++
 		}
 	}
-	if needed+proxyListeners > e.maxListeners {
+	if needed > e.maxListeners {
 		return fmt.Errorf("configuration switch needs %d listeners with predecessor, limit %d", needed, e.maxListeners)
 	}
 	newListeners := make(map[listenerKey]*listener)
 	success := false
-	newReservation := len(proxyRules) > 0 && e.proxy.reserved == 0
-	if newReservation {
-		if err := e.reserveProxySessions(); err != nil {
-			return err
-		}
-	}
+	previousReservation := e.proxy.reserved
 	defer func() {
 		if !success {
-			if newReservation {
-				e.releaseProxySessions()
-			}
+			e.releaseProxySessions(previousReservation)
 			for _, l := range newListeners {
 				l.close()
 			}
@@ -614,19 +610,17 @@ func (e *Engine) apply(ctx context.Context, c wire.Config, save, invalidateCache
 		l.route.Store(rr)
 		newListeners[key] = l
 	}
-	staged, proxyConfig, err := e.stageProxy(ctx, proxyRules)
-	if err != nil {
+	saved := false
+	staged, proxyConfig, err := e.stageProxy(ctx, proxyRules, newListeners, func() error {
+		err := save()
+		saved = err == nil
 		return err
-	}
-	defer func() {
-		if !success && staged != nil && staged != e.proxy.active {
-			staged.stop()
+	})
+	if err != nil {
+		if saved && invalidateCache != nil {
+			return errors.Join(err, invalidateCache())
 		}
-	}()
-	if save != nil {
-		if err := save(); err != nil {
-			return err
-		}
+		return err
 	}
 	for id, candidate := range candidates {
 		old := e.activeRules[id]
@@ -646,24 +640,34 @@ func (e *Engine) apply(ctx context.Context, c wire.Config, save, invalidateCache
 			old.cancelLifetime()
 		}
 	}
-	e.commitProxy(staged, proxyConfig, proxyRules)
 	for key, l := range e.listeners {
 		if rr := next[key]; rr != nil {
 			l.route.Store(rr)
+			if key.network == "tcp" && rr.rule.HAProxy {
+				l.pauseTCP()
+			}
 		} else {
 			l.close()
 			delete(e.listeners, key)
 		}
 	}
+	e.commitProxy(staged, proxyConfig, proxyRules, candidates)
 	for key, l := range newListeners {
 		e.listeners[key] = l
-		e.workers.Go(func() {
-			if l.tcp != nil {
+		if l.udp != nil {
+			e.workers.Go(func() { e.serveUDP(ctx, l) })
+		}
+	}
+	for key, l := range e.listeners {
+		if key.network == "tcp" && !l.route.Load().rule.HAProxy && l.tcpDone == nil {
+			_ = l.tcp.(*net.TCPListener).SetDeadline(time.Time{})
+			l.tcpDone = make(chan struct{})
+			done := l.tcpDone
+			e.workers.Go(func() {
+				defer close(done)
 				e.serveTCP(ctx, l)
-			} else {
-				e.serveUDP(ctx, l)
-			}
-		})
+			})
+		}
 	}
 	for key, stats := range newCounters {
 		e.counters[key] = stats
@@ -681,10 +685,17 @@ func (e *Engine) Status() (string, int, int) {
 	if e.proxy.listeners > 0 && !e.proxy.active.running() {
 		e.applied = ""
 	}
-	if e.proxy.listeners == 0 && !e.proxy.draining.running() {
-		e.releaseProxySessions()
+	e.releaseIdleProxySessions()
+	return e.applied, len(e.listeners), len(e.slots) - e.proxy.reserved + e.proxy.connections
+}
+
+func (l *listener) pauseTCP() {
+	if l.tcpDone == nil {
+		return
 	}
-	return e.applied, len(e.listeners) + e.proxy.listeners, len(e.slots) - e.proxy.reserved + e.proxy.connections
+	_ = l.tcp.(*net.TCPListener).SetDeadline(time.Now())
+	<-l.tcpDone
+	l.tcpDone = nil
 }
 
 func (e *Engine) Close() {
@@ -704,7 +715,7 @@ func (e *Engine) Close() {
 		}
 	}
 	e.scheduleProxyExpiry()
-	e.releaseProxySessions()
+	e.releaseProxySessions(0)
 }
 
 func (e *Engine) Traffic() []wire.Traffic {
@@ -716,6 +727,13 @@ func (e *Engine) Traffic() []wire.Traffic {
 			connections, _ := process.sample()
 			e.proxy.connections += connections
 		}
+		process.flushTraffic()
+	}
+	if !e.proxy.draining.running() {
+		e.proxy.draining = nil
+	}
+	if !e.proxy.active.running() {
+		e.proxy.active = nil
 	}
 	values := []wire.Traffic{}
 	activeProxy, drainingProxy := e.proxy.active.running(), e.proxy.draining.running()
@@ -1113,12 +1131,12 @@ func (w countedWriter) Write(p []byte) (int, error) {
 			return 0, e
 		}
 	}
-	finish, ok := w.runtime.quota.take(w.billing, len(p))
+	reservation, ok := w.runtime.quota.take(w.billing, len(p))
 	if !ok {
 		return 0, errors.New("quota allowance exhausted")
 	}
 	n, e := w.Writer.Write(p)
-	finish(n)
+	reservation.finish(n)
 	w.bytes.Add(int64(n))
 	return n, e
 }

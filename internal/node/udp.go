@@ -1,6 +1,7 @@
 package node
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"net"
@@ -18,7 +19,7 @@ import (
 const udpIdle = 45 * time.Second
 
 type udpSession struct {
-	packets chan []byte
+	packets chan *queuedDatagram
 }
 type udpSessions struct {
 	mu    sync.Mutex
@@ -28,6 +29,37 @@ type udpSessions struct {
 type udpBuffer [65535]byte
 
 var udpBuffers = sync.Pool{New: func() any { return new(udpBuffer) }}
+
+type queuedDatagram struct{ data []byte }
+
+const smallDatagramSize, mtuDatagramSize = 256, 1536
+
+var smallDatagrams = sync.Pool{New: func() any { return &queuedDatagram{data: make([]byte, smallDatagramSize)} }}
+var mtuDatagrams = sync.Pool{New: func() any { return &queuedDatagram{data: make([]byte, mtuDatagramSize)} }}
+
+func queueDatagram(data []byte) *queuedDatagram {
+	var packet *queuedDatagram
+	switch {
+	case len(data) <= smallDatagramSize:
+		packet = smallDatagrams.Get().(*queuedDatagram)
+	case len(data) <= mtuDatagramSize:
+		packet = mtuDatagrams.Get().(*queuedDatagram)
+	default:
+		return &queuedDatagram{data: bytes.Clone(data)}
+	}
+	packet.data = packet.data[:len(data)]
+	copy(packet.data, data)
+	return packet
+}
+
+func (packet *queuedDatagram) release() {
+	switch cap(packet.data) {
+	case smallDatagramSize:
+		smallDatagrams.Put(packet)
+	case mtuDatagramSize:
+		mtuDatagrams.Put(packet)
+	}
+}
 
 type udpSocketReader struct {
 	raw  syscall.RawConn
@@ -59,7 +91,7 @@ func (reader udpSocketReader) read(fallback net.Conn) (*udpBuffer, int, netip.Ad
 			if reader.peer {
 				n, addr, readErr = unix.Recvfrom(int(fd), buffer[:], 0)
 			} else {
-				n, _, readErr = unix.Recvfrom(int(fd), buffer[:], 0)
+				n, readErr = unix.Read(int(fd), buffer[:])
 			}
 			if readErr != unix.EINTR {
 				break
@@ -109,7 +141,7 @@ func (e *Engine) serveUDP(ctx context.Context, l *listener) {
 			select {
 			case e.slots <- struct{}{}:
 				if rr.admit(addr.Addr().String()) {
-					s = &udpSession{packets: make(chan []byte, 4)}
+					s = &udpSession{packets: make(chan *queuedDatagram, 4)}
 					sessions.items[addr] = s
 					e.activeUDP.Add(1)
 					e.workers.Go(func() {
@@ -119,7 +151,8 @@ func (e *Engine) serveUDP(ctx context.Context, l *listener) {
 							delete(sessions.items, addr)
 							for len(s.packets) > 0 {
 								p := <-s.packets
-								e.udpQueued.Add(-int64(len(p)))
+								e.udpQueued.Add(-int64(len(p.data)))
+								p.release()
 							}
 							sessions.mu.Unlock()
 						}()
@@ -134,9 +167,7 @@ func (e *Engine) serveUDP(ctx context.Context, l *listener) {
 		if s != nil && len(s.packets) < cap(s.packets) {
 			length := int64(n)
 			if e.udpQueued.Add(length) <= 16<<20 {
-				packet := make([]byte, n)
-				copy(packet, buf[:n])
-				s.packets <- packet
+				s.packets <- queueDatagram(buf[:n])
 			} else {
 				e.udpQueued.Add(-length)
 				e.udpDropped.Add(1)
@@ -199,10 +230,10 @@ func (e *Engine) forwardUDP(ctx context.Context, listen *net.UDPConn, source net
 			_ = target.SetReadDeadline(time.Now().Add(udpIdle))
 			buf, n, _, err := reader.read(target)
 			if err == nil && rr.admitPacket(n) {
-				if finish, allowed := rr.quota.take(billing, n); allowed {
+				if reservation, allowed := rr.quota.take(billing, n); allowed {
 					var written int
 					written, err = listen.WriteToUDPAddrPort(buf[:n], source)
-					finish(written)
+					reservation.finish(written)
 					if err == nil {
 						counts.out.Add(int64(written))
 					}
@@ -222,9 +253,10 @@ func (e *Engine) forwardUDP(ctx context.Context, listen *net.UDPConn, source net
 			return
 		case <-finished:
 			return
-		case packet := <-s.packets:
+		case queued := <-s.packets:
+			packet := queued.data
 			if rr.admitPacket(len(packet)) {
-				finish, allowed := rr.quota.take(billing, len(packet))
+				reservation, allowed := rr.quota.take(billing, len(packet))
 				if allowed {
 					_ = target.SetWriteDeadline(time.Now().Add(3 * time.Second))
 					payload := packet
@@ -234,12 +266,13 @@ func (e *Engine) forwardUDP(ctx context.Context, listen *net.UDPConn, source net
 					}
 					n, e := target.Write(payload)
 					n = min(len(packet), max(0, n-len(proxyPrefix)))
-					finish(n)
+					reservation.finish(n)
 					counts.in.Add(int64(n))
 					err = e
 				}
 			}
 			e.udpQueued.Add(-int64(len(packet)))
+			queued.release()
 			if errors.Is(err, syscall.EMSGSIZE) {
 				e.udpDropped.Add(1)
 				err = nil

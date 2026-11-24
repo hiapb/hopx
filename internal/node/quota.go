@@ -159,14 +159,35 @@ func (q *quotaBook) signalChange(key quotaKey) {
 	}
 }
 
-func (q *quotaBook) take(rule wire.Forward, length int) (func(int), bool) {
-	finish, ok, _ := q.reserve(rule, length, false)
-	return finish, ok
+type quotaReservation struct {
+	book         *quotaBook
+	grant        *localGrant
+	key          quotaKey
+	ratio        int64
+	reservedSize int
 }
 
-func (q *quotaBook) reserve(rule wire.Forward, length int, wait bool) (func(int), bool, <-chan struct{}) {
+func (r quotaReservation) finish(actual int) {
+	if r.grant == nil {
+		return
+	}
+	r.book.mu.Lock()
+	r.grant.pending -= int64(r.reservedSize) * r.ratio
+	r.grant.spent += int64(actual) * r.ratio
+	if actual < r.reservedSize {
+		r.book.signalChange(r.key)
+	}
+	r.book.mu.Unlock()
+}
+
+func (q *quotaBook) take(rule wire.Forward, length int) (quotaReservation, bool) {
+	reservation, ok, _ := q.reserve(rule, length, false)
+	return reservation, ok
+}
+
+func (q *quotaBook) reserve(rule wire.Forward, length int, wait bool) (quotaReservation, bool, <-chan struct{}) {
 	if !rule.QuotaManaged || rule.Ratio == 0 {
-		return func(int) {}, true, nil
+		return quotaReservation{}, true, nil
 	}
 	cost := int64(length) * rule.Ratio
 	q.mu.Lock()
@@ -189,22 +210,14 @@ func (q *quotaBook) reserve(rule wire.Forward, length int, wait bool) (func(int)
 			}
 		}
 		q.mu.Unlock()
-		return nil, false, changed
+		return quotaReservation{}, false, changed
 	}
 	g.pending += cost
 	if g.Allocated-g.spent-g.pending < 8*1024*1024*1000 && g.Allocated >= 16*1024*1024*1000 {
 		q.requestSync()
 	}
 	q.mu.Unlock()
-	return func(actual int) {
-		q.mu.Lock()
-		g.pending -= cost
-		g.spent += int64(actual) * rule.Ratio
-		if actual < length {
-			q.signalChange(key)
-		}
-		q.mu.Unlock()
-	}, true, nil
+	return quotaReservation{book: q, grant: g, key: key, ratio: rule.Ratio, reservedSize: length}, true, nil
 }
 
 func (q *quotaBook) requestSync() {

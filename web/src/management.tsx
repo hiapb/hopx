@@ -727,7 +727,7 @@ export default function Management({ page, user, refresh }: Props) {
         { ...value, gateway: value.gateway || gatewayID, amount: Math.round(value.amount * 100) },
       );
       if (result.qr) {
-        modal.info({ title: "请扫码支付", content: <QRCode value={result.url} aria-label="支付二维码" /> });
+        showPaymentQR(result.url);
       } else {
         window.location.assign(result.url);
       }
@@ -738,11 +738,21 @@ export default function Management({ page, user, refresh }: Props) {
     }
   }
 
+  function showPaymentQR(url: string) {
+    modal.info({
+      title: "请扫码支付",
+      width: 360,
+      icon: null,
+      okText: "关闭",
+      content: <QRCode className="dialog-qr" value={url} size={208} color="#16251d" bgColor="#ffffff" aria-label="支付二维码" />,
+    });
+  }
+
   async function resumePayment(id:number){
     try{
       const result = await api<{url: string; qr?: boolean}>("/orders/" + id + "/checkout", "POST");
       if (result.qr) {
-        modal.info({ title: "请扫码支付", content: <QRCode value={result.url} aria-label="支付二维码" /> });
+        showPaymentQR(result.url);
       } else {
         window.location.assign(result.url);
       }
@@ -758,7 +768,7 @@ export default function Management({ page, user, refresh }: Props) {
     confirmAction({
       title,
       okText: "确认",
-      cancelText: "取消",
+      okButtonProps: { danger: method === "DELETE" },
       onOk: () => action(path, method, value),
     });
   }
@@ -1778,11 +1788,10 @@ export default function Management({ page, user, refresh }: Props) {
           disabled: accounting !== undefined && accounting.after < 0,
         }}
         width={editingUserPlan || pushingPlan ? 482 : page === "groups" || page === "plans" || page === "users" || page === "settings" ? 680 : 520}
-        className="management-modal"
       >
         <Form name="management-editor" layout="vertical" form={form} onFinish={submit}>
-          {editor?.path.endsWith("/password") && <p className="muted alert-gap">保存后，此账号的现有登录会失效。</p>}
-          {editor?.path.endsWith("/referral") && editor.value.inviter > 0 && <p className="muted alert-gap">邀请人 UID {editor.value.inviter}</p>}
+          {editor?.path.endsWith("/password") && <p className="dialog-note">保存后，此账号的现有登录会失效。</p>}
+          {editor?.path.endsWith("/referral") && editor.value.inviter > 0 && <p className="dialog-note">邀请人 UID {editor.value.inviter}</p>}
           {isGroupEditor && editor && editor.path !== "/admin/groups/folders" ? (
             <>
               <div className="equipment-editor">
@@ -1867,10 +1876,9 @@ export default function Management({ page, user, refresh }: Props) {
       <Modal
         open={!!enroll}
         title={<div className="enroll-title">
-          <span className="enroll-title-icon"><Server size={19} aria-hidden="true" /></span>
+          <span className="dialog-title-icon"><Server size={19} aria-hidden="true" /></span>
           <div><strong>接入节点</strong><span>{enroll?.groupName}</span></div>
         </div>}
-        className="enroll-modal"
         width={620}
         onCancel={() => setEnroll(undefined)}
         footer={<Button

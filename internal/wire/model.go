@@ -242,7 +242,16 @@ type Report struct {
 	Traffic     []Traffic `json:"traffic"`
 }
 
+type Bandwidth struct {
+	InMbps    float64 `json:"inMbps"`
+	OutMbps   float64 `json:"outMbps"`
+	InBytes   int64   `json:"inBytes,omitempty"`
+	OutBytes  int64   `json:"outBytes,omitempty"`
+	HasTotals bool    `json:"hasTotals,omitempty"`
+}
+
 type Metrics struct {
+	Bandwidth
 	FileDescriptors  int     `json:"fileDescriptors,omitempty"`
 	FileLimit        uint64  `json:"fileLimit,omitempty"`
 	BindAddresses    int     `json:"bindAddresses,omitempty"`
@@ -255,8 +264,6 @@ type Metrics struct {
 	CPU              float64 `json:"cpu"`
 	RAM              float64 `json:"ram"`
 	Disk             float64 `json:"disk"`
-	InMbps           float64 `json:"inMbps"`
-	OutMbps          float64 `json:"outMbps"`
 	Uptime           int64   `json:"uptime"`
 	Connections      int64   `json:"connections"`
 	Listeners        int     `json:"listeners"`
@@ -270,6 +277,7 @@ type Heartbeat struct {
 	ManagedUpgrade              *bool             `json:"managedUpgrade,omitempty"`
 	AcceptPortCheck             bool              `json:"acceptPortCheck,omitempty"`
 	AcceptHAProxy               bool              `json:"acceptHAProxy,omitempty"`
+	AcceptHAProxyHandoff        bool              `json:"acceptHAProxyHandoff,omitempty"`
 	AcceptPing                  bool              `json:"acceptPing,omitempty"`
 	ActiveRelayMode             string            `json:"activeRelayMode,omitempty"`
 	RelayModeError              string            `json:"relayModeError,omitempty"`
@@ -332,6 +340,7 @@ type Release struct {
 }
 
 type Sync struct {
+	LiveBandwidth   bool              `json:"liveBandwidth,omitempty"`
 	MeterKey        []byte            `json:"meterKey,omitempty"`
 	MeterGroup      int64             `json:"meterGroup,omitempty"`
 	RelayMode       string            `json:"relayMode,omitempty"`
@@ -347,25 +356,26 @@ type Sync struct {
 }
 
 type Device struct {
-	CountryCode         string `json:"countryCode,omitempty"`
-	AcceptScopedReverse bool   `json:"-"`
-	AcceptExitMeter     bool   `json:"-"`
-	AcceptPortCheck     bool   `json:"-"`
-	AcceptHAProxy       bool   `json:"acceptHAProxy,omitempty"`
-	AcceptPing          bool   `json:"acceptPing,omitempty"`
-	ActiveRelayMode     string `json:"-"`
-	RelayModeError      string `json:"relayModeError,omitempty"`
-	NativeUDPKey        string `json:"-"`
-	NativeUDP           bool   `json:"nativeUDP,omitempty"`
-	NativeUDPError      string `json:"nativeUDPError,omitempty"`
-	AcceptRuleProbe     bool   `json:"-"`
-	AcceptRouteProbe    bool   `json:"-"`
-	AcceptLinkProbe     bool   `json:"-"`
-	TargetVersion       string `json:"targetVersion,omitempty"`
-	OS                  string `json:"os,omitempty"`
-	Arch                string `json:"arch,omitempty"`
-	ID                  int64  `json:"id"`
-	GroupID             int64  `json:"groupId"`
+	CountryCode          string `json:"countryCode,omitempty"`
+	AcceptScopedReverse  bool   `json:"-"`
+	AcceptExitMeter      bool   `json:"-"`
+	AcceptPortCheck      bool   `json:"-"`
+	AcceptHAProxy        bool   `json:"acceptHAProxy,omitempty"`
+	AcceptHAProxyHandoff bool   `json:"-"`
+	AcceptPing           bool   `json:"acceptPing,omitempty"`
+	ActiveRelayMode      string `json:"-"`
+	RelayModeError       string `json:"relayModeError,omitempty"`
+	NativeUDPKey         string `json:"-"`
+	NativeUDP            bool   `json:"nativeUDP,omitempty"`
+	NativeUDPError       string `json:"nativeUDPError,omitempty"`
+	AcceptRuleProbe      bool   `json:"-"`
+	AcceptRouteProbe     bool   `json:"-"`
+	AcceptLinkProbe      bool   `json:"-"`
+	TargetVersion        string `json:"targetVersion,omitempty"`
+	OS                   string `json:"os,omitempty"`
+	Arch                 string `json:"arch,omitempty"`
+	ID                   int64  `json:"id"`
+	GroupID              int64  `json:"groupId"`
 	Registration
 	Version     string    `json:"version"`
 	Revision    string    `json:"revision"`

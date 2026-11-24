@@ -3,13 +3,14 @@ import { Alert, Button, Modal, Pagination, Segmented, Spin, Tag, Tooltip } from 
 import { Activity, ChevronLeft, ChevronRight, Clock3, Crosshair, GitBranch, RadioTower, RefreshCw, Route, Server } from "lucide-react";
 import { api } from "./api";
 import type { Rule } from "./api";
+import { NodeFlag, nodeDisplayName } from "./node-location";
 import { relayModeLabel } from "./relay-protocols";
 
 type Step = { groupId?: number; transport?: string; status: string; phase?: string; latencyMs: number };
 type Trace = { steps: Step[]; target?: string };
 type Link = { network: string; lane: string; measuresTarget: boolean; traces: Trace[] | null };
 type LegacyRoute = { status: string; latencyMs: number; trace?: { reached: number; hops: number } };
-type Entry = { number: number; name: string; online: boolean; status: string; applyError?: string; links?: Link[]; primary?: LegacyRoute; backup?: LegacyRoute;
+type Entry = { number: number; id?: number; name: string; region?: string; countryCode?: string; online: boolean; status: string; applyError?: string; links?: Link[]; primary?: LegacyRoute; backup?: LegacyRoute;
   recentRoutes?: { network: string; at: number; backup: boolean }[] };
 type Diagnostic = {
   entry: string;
@@ -50,7 +51,7 @@ const states: Record<string, [string, string]> = {
 };
 
 const phaseLabels: Record<string, string> = {
-  handshake: "传输握手", relay_connect: "连接中继", tcp_connect: "TCPing", target_connect: "打开目标连接", udp_echo: "UDP Echo",
+  handshake: "传输握手", relay_connect: "连接中继", tcp_connect: "TCPing", target_connect: "打开目标连接", udp_echo: "UDP Echo", target_policy: "目标地址受限",
 };
 
 const laneKey = (link: { network: string; lane: string }) => link.network + "-" + link.lane;
@@ -63,6 +64,7 @@ const loss = (stats: Stats) => stats.attempts ? (stats.failed / stats.attempts *
 const average = (stats: Stats) => stats.attempts > stats.failed ? Math.round(stats.totalMs / (stats.attempts - stats.failed)) + " ms" : "—";
 const noMeasurement = (point: Point) => point.samples ? "已采样，无测量结果" : "未采样";
 const transportLabel = (transport?: string) => transport === "dtls" ? "DTLS" : transport === "reverse" ? "反向 TLS" : transport ? relayModeLabel(transport) : "";
+const entryDisplayName = (node: Entry) => nodeDisplayName(node, `入口 ${node.number}`);
 
 function Status({ status }: { status: string }) {
   const [label, color] = states[status] ?? ["等待探测", "default"];
@@ -117,17 +119,19 @@ function HistoryChart({ points, range, label }: { points: Point[]; range: TimeRa
   );
 }
 
-export default function RuleDiagnostics({ rule, describePath, onClose }: {
+export default function RuleDiagnostics({ rule, entryName, describePath, onClose }: {
   rule: Rule;
+  entryName?: string;
   describePath: (path: number[] | null) => string;
   onClose: () => void;
 }) {
-  const [result, setResult] = useState<Diagnostic>();
+  const [snapshot, setSnapshot] = useState<{ page: number; revision: number; data: Diagnostic }>();
+  const [probed, setProbed] = useState<{ number: number; revision: number; data: Diagnostic; at: number }>();
   const [historyResponse, setHistoryResponse] = useState<{ ruleId: number; range: TimeRange; data: History }>();
   const [range, setRange] = useState<TimeRange>("live");
   const [page, setPage] = useState(1);
   const [revision, setRevision] = useState(0);
-  const [busy, setBusy] = useState(false);
+  const [probeBusy, setProbeBusy] = useState(false);
   const [historyBusy, setHistoryBusy] = useState(true);
   const [liveError, setLiveError] = useState("");
   const [historyError, setHistoryError] = useState("");
@@ -135,24 +139,46 @@ export default function RuleDiagnostics({ rule, describePath, onClose }: {
   const [selectedLane, setSelectedLane] = useState<string>();
   const [selectedSegment, setSelectedSegment] = useState<string>();
   const [attempt, setAttempt] = useState(0);
-  const [checkedAt, setCheckedAt] = useState(0);
   const history = historyResponse?.ruleId === rule.id && historyResponse.range === range ? historyResponse.data : undefined;
+  const status = snapshot?.page === page ? snapshot.data : undefined;
+  const selected = status?.nodes.find(node => node.number === selectedEntry) ??
+    status?.nodes.find(node => node.status === "running") ?? status?.nodes[0];
+  const selectedNumber = selected?.number;
+  const currentProbe = probed && probed.number === selectedNumber && probed.data.page === status?.page ? probed : undefined;
+  const result = currentProbe?.revision === snapshot?.revision ? currentProbe?.data ?? status : status;
+  const entry = result?.nodes.find(node => node.number === selectedNumber);
+  const checkedAt = currentProbe?.at ?? 0;
+  const statusBusy = (snapshot?.page !== page || snapshot.revision !== revision) && !liveError;
+  const liveRange = range === "live";
+  const busy = liveRange && (statusBusy || probeBusy);
 
   useEffect(() => {
     const request = new AbortController();
-    setBusy(true);
     setLiveError("");
-    api<Diagnostic>(`/rules/${rule.id}/diagnose?detail=1&page=${page}`, "POST", undefined, request.signal)
+    api<Diagnostic>(`/rules/${rule.id}/diagnose?status=1&page=${page}`, "POST", undefined, request.signal)
       .then(data => {
-        if (!request.signal.aborted) {
-          setResult(data);
-          setCheckedAt(Math.floor(Date.now() / 1000));
-        }
+        if (!request.signal.aborted) setSnapshot({ page, revision, data });
       })
-      .catch((error: Error) => { if (!request.signal.aborted) setLiveError(error.message); })
-      .finally(() => { if (!request.signal.aborted) setBusy(false); });
+      .catch((error: Error) => { if (!request.signal.aborted) setLiveError(error.message); });
     return () => request.abort();
   }, [rule.id, page, revision]);
+
+  useEffect(() => {
+    if (!liveRange || !selectedNumber || selected?.status !== "running" || snapshot?.revision !== revision) {
+      setProbeBusy(false);
+      return;
+    }
+    const request = new AbortController();
+    setProbeBusy(true);
+    setLiveError("");
+    api<Diagnostic>(`/rules/${rule.id}/diagnose?detail=1&page=${page}&node=${selectedNumber}`, "POST", undefined, request.signal)
+      .then(data => {
+        if (!request.signal.aborted) setProbed({ number: selectedNumber, revision, data, at: Math.floor(Date.now() / 1000) });
+      })
+      .catch((error: Error) => { if (!request.signal.aborted) setLiveError(error.message); })
+      .finally(() => { if (!request.signal.aborted) setProbeBusy(false); });
+    return () => request.abort();
+  }, [rule.id, page, revision, snapshot, selectedNumber, selected?.status, liveRange]);
 
   useEffect(() => {
     const request = new AbortController();
@@ -179,10 +205,8 @@ export default function RuleDiagnostics({ rule, describePath, onClose }: {
       request.abort();
       window.clearTimeout(timer);
     };
-  }, [rule.id, range, checkedAt]);
+  }, [rule.id, range, liveRange ? checkedAt : 0]);
 
-  const entry = result?.nodes.find(node => node.number === selectedEntry) ??
-    result?.nodes.find(node => node.links?.length) ?? result?.nodes[0];
   const lanes = new Map<string, { network: string; lane: string }>();
   for (const link of [...(entry?.links ?? []), ...(history?.lanes ?? [])]) lanes.set(laneKey(link), link);
   const activeLane = selectedLane && lanes.has(selectedLane) ? selectedLane : lanes.keys().next().value;
@@ -193,18 +217,19 @@ export default function RuleDiagnostics({ rule, describePath, onClose }: {
   const trace = traces[attempt] ?? traces[0];
   const stats = segment ?? summary;
   const points = segment?.points ?? summary?.points;
-  const header = [result?.entry, rule.tlsSharedPort || rule.port, (rule.effectiveNetwork || rule.protocol).toUpperCase()].filter(Boolean).join(" · ");
+  const network = rule.effectiveNetwork || rule.protocol;
+  const header = [result?.entry || entryName, rule.tlsSharedPort || rule.port, network === "both" ? "TCP + UDP" : network.toUpperCase()].filter(Boolean).join(" · ");
   const nameFor = (step: { groupId?: number }, index: number, target: boolean) => target ? "目标地址" : step.groupId ? describePath([step.groupId]) : "第 " + (index + 1) + " 跳";
   const currentPath = activeLane?.endsWith("-backup") ? result?.backupPath : result?.primaryPath;
   const path = activeLane === "tcp-primary" && rule.protocol.startsWith("haproxy-") ? "HAProxy 直连" : describePath(currentPath ?? null);
   const lastStep = trace?.steps.at(-1);
   const checkedRoute = activeLane?.endsWith("-backup") ? entry?.backup : entry?.primary;
-  const routeStatus = lastStep
-    ? lastStep.status === "ok" ? "本次探测成功" : lastStep.status === "unknown" ? "目标无探测结果" : "本次探测未接通"
-    : checkedRoute ? states[checkedRoute.status]?.[0] : "暂无探测结果";
+  const failedStep = trace?.steps.some(step => step.status === "failed");
+  const routeStatus = !trace ? states[checkedRoute?.status ?? entry?.status ?? ""]?.[0] :
+    failedStep ? "链路未接通" : lastStep?.status === "unknown" ? "目标未测量" : lastStep?.status === "ok" ? "链路已接通" : "暂无探测结果";
 
   return (
-    <Modal open title={<span className="diagnostic-title"><Activity size={19} />规则诊断</span>} width={920}
+    <Modal open title={<span className="diagnostic-title"><span className="dialog-title-icon"><Activity size={19} aria-hidden="true" /></span>规则诊断</span>} width={840}
       className="rule-diagnostics" onCancel={onClose}
       footer={<Button onClick={onClose}>关闭</Button>}>
       <div className="diagnostic-heading">
@@ -228,28 +253,32 @@ export default function RuleDiagnostics({ rule, describePath, onClose }: {
       {historyError && <Alert type="warning" showIcon message={historyError} />}
 
       {range === "live" && (
-        <section className="diagnostic-section" aria-label="实时链路">
+        <section className="diagnostic-section diagnostic-live" aria-label="实时链路">
           <div className="diagnostic-section-head">
             <h3><RadioTower size={17} />入口与链路</h3>
-            {checkedAt > 0 && <span className="muted">{busy ? "探测中" : clock.format(checkedAt * 1000)}</span>}
+            {busy ? <span className="diagnostic-progress" role="status"><Spin size="small" />{statusBusy ? "读取入口状态" : "等待节点回报"}</span>
+              : checkedAt > 0 && <time className="muted" dateTime={new Date(checkedAt * 1000).toISOString()}>最近探测 {clock.format(checkedAt * 1000)}</time>}
           </div>
           {!!result?.nodes.length && <div className="diagnostic-entry-list" role="group" aria-label="入口设备">
-            {result.nodes.map(node => <button key={node.number} type="button" className="diagnostic-entry-choice"
-              aria-pressed={entry?.number === node.number} onClick={() => {
-                setSelectedEntry(node.number);
-                setAttempt(0);
-              }}>
-              <span>{node.name}</span><Status status={node.status} /><ChevronRight size={14} aria-hidden="true" />
-            </button>)}
+            {result.nodes.map(node => {
+              const identity = <><span className="diagnostic-node-name"><NodeFlag node={node} />{entryDisplayName(node)}</span><Status status={node.status} /></>;
+              return result.nodes.length === 1 ? <div key={node.number} className="diagnostic-entry-choice">{identity}</div> :
+                <button key={node.number} type="button" className="diagnostic-entry-choice"
+                  aria-pressed={entry?.number === node.number} onClick={() => {
+                    setSelectedEntry(node.number);
+                    setAttempt(0);
+                  }}>
+                  {identity}<ChevronRight size={14} aria-hidden="true" />
+                </button>;
+            })}
           </div>}
           {result && result.total > result.pageSize && <div className="diagnostic-entry">
             <Pagination simple size="small" current={result.page} pageSize={result.pageSize}
               total={result.total} onChange={value => { setPage(value); setSelectedEntry(undefined); setAttempt(0); }} disabled={busy} />
           </div>}
-          {entry && <dl className="entry-summary">
-            <div><dt>节点心跳</dt><dd>{entry.online ? "在线" : "离线"}</dd></div>
-            <div><dt>转发配置</dt><dd>{entry.online ? states[entry.status]?.[0] || "等待同步" : "等待节点回报"}</dd></div>
-            <div><dt>{live?.lane === "backup" ? "备用链路" : "链路探测"}</dt><dd>{routeStatus}</dd></div>
+          {entry && <dl className="diagnostic-link-summary">
+            <div><dt>节点心跳</dt><dd><span className={entry.online ? "diagnostic-dot online" : "diagnostic-dot"} />{entry.online ? "在线" : "离线"}</dd></div>
+            {busy || trace || checkedRoute ? <div><dt>{live?.lane === "backup" ? "备用链路" : "链路探测"}</dt><dd>{busy ? "探测中" : routeStatus}</dd></div> : null}
           </dl>}
           {!!result?.backupPath?.length && entry?.status === "running" && <div className="diagnostic-recent-routes">
             <span>最近实际转发</span>
@@ -258,9 +287,8 @@ export default function RuleDiagnostics({ rule, describePath, onClose }: {
             </Tag>) : <span className="muted">暂无连接记录</span>}
           </div>}
           {entry?.applyError && <Alert type="error" showIcon message={entry.applyError} />}
-          {!result && busy && <div className="rule-diagnostic-loading" role="status"><Spin />等待入口节点回报</div>}
           {result && !entry && <p className="diagnostic-empty">入口组尚未接入设备</p>}
-          {entry && !entry.links?.length && <p className="diagnostic-empty">
+          {entry?.status === "running" && !busy && !entry.links?.length && <p className="diagnostic-empty">
             {entry.primary ? <><Status status={entry.primary.status} />{entry.primary.latencyMs} ms · 入口节点更新后可查看逐跳结果</>
               : !rule.enabled ? "启用规则后可探测链路。" : rule.tlsShared ? "共享 TLS 的目标链路在各 SNI 子规则中查看。" : "等待入口发回逐跳探测结果。"}
           </p>}
@@ -285,10 +313,10 @@ export default function RuleDiagnostics({ rule, describePath, onClose }: {
                 onClick={() => setAttempt(index)}>第 {index + 1} 次</Button>
             ))}
           </div>}
-          {trace ? <ol className="diagnostic-steps">
+          {trace && entry ? <ol className="diagnostic-steps">
             <li data-state="ok">
               <span className="diagnostic-step-icon"><Server size={16} /></span>
-              <div><strong>{entry?.name}</strong><small>发起探测</small></div>
+              <div><strong className="diagnostic-node-name"><NodeFlag node={entry} />{entryDisplayName(entry)}</strong><small>探测起点</small></div>
             </li>
             {trace.steps.map((step, index) => {
               const target = index === trace.steps.length - 1;
@@ -315,7 +343,7 @@ export default function RuleDiagnostics({ rule, describePath, onClose }: {
         {summary && stats && points?.length ? <>
           <div className="diagnostic-metrics">
             <div><span>探测丢包率</span><strong>{loss(stats)}</strong></div>
-            <div><span>平均耗时</span><strong>{average(stats)}</strong></div>
+            <div><span>{segment ? "历史单跳均值" : "历史全链路均值"}</span><strong>{average(stats)}</strong></div>
             <div><span>失败 / 探测</span><strong>{stats.failed} / {stats.attempts}</strong></div>
           </div>
           <HistoryChart key={range + activeLane + selectedSegment} points={points} range={range}

@@ -5,7 +5,6 @@ import (
 	"crypto/ed25519"
 	"errors"
 	"net"
-	"sync/atomic"
 	"time"
 
 	"hopx/internal/wire"
@@ -92,13 +91,13 @@ type exitConn struct {
 	billing wire.Forward
 }
 
-func (c *exitConn) take(size int) (func(int), error) {
+func (c *exitConn) take(size int) (quotaReservation, error) {
 	if c.quota == nil || size == 0 {
-		return nil, nil
+		return quotaReservation{}, nil
 	}
-	finish, ok, changed := c.quota.reserve(c.billing, size, true)
+	reservation, ok, changed := c.quota.reserve(c.billing, size, true)
 	if ok {
-		return finish, nil
+		return reservation, nil
 	}
 	// Wake when the panel updates this user's lease, or when the wait ends.
 	timer := time.NewTimer(3 * time.Second)
@@ -106,44 +105,39 @@ func (c *exitConn) take(size int) (func(int), error) {
 	for changed != nil {
 		select {
 		case <-c.ctx.Done():
-			return nil, c.ctx.Err()
+			return quotaReservation{}, c.ctx.Err()
 		case <-timer.C:
-			return nil, errRelayQuota
+			return quotaReservation{}, errRelayQuota
 		case <-changed:
-			finish, ok, changed = c.quota.reserve(c.billing, size, true)
+			reservation, ok, changed = c.quota.reserve(c.billing, size, true)
 			if ok {
-				return finish, nil
+				return reservation, nil
 			}
 		}
 	}
-	return nil, errRelayQuota
+	return quotaReservation{}, errRelayQuota
 }
 
 func (c *exitConn) Read(p []byte) (int, error) {
 	n, err := c.Conn.Read(p)
-	finish, quotaErr := c.take(n)
+	reservation, quotaErr := c.take(n)
 	if quotaErr != nil {
 		return 0, quotaErr
 	}
-	countExit(&c.traffic.out, finish, n)
+	reservation.finish(n)
+	c.traffic.out.Add(int64(n))
 	return n, err
 }
 
 func (c *exitConn) Write(p []byte) (int, error) {
-	finish, err := c.take(len(p))
+	reservation, err := c.take(len(p))
 	if err != nil {
 		return 0, err
 	}
 	n, err := c.Conn.Write(p)
-	countExit(&c.traffic.in, finish, n)
+	reservation.finish(n)
+	c.traffic.in.Add(int64(n))
 	return n, err
-}
-
-func countExit(counter *atomic.Int64, finish func(int), n int) {
-	if finish != nil {
-		finish(n)
-	}
-	counter.Add(int64(n))
 }
 
 func (c *exitConn) CloseWrite() error {

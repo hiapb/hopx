@@ -109,11 +109,25 @@ func TestRuleSubscriptionLifecycle(t *testing.T) {
 	var enrollment struct{ Token string }
 	testRequest(t, admin, "POST", fmt.Sprintf("%s/admin/groups/%d/enrollment", base, entry.ID), nil, nil, 201, &enrollment)
 	var node wire.Identity
-	testRequest(t, admin, "POST", base+"/node/register", map[string]string{"Authorization": "Bearer " + enrollment.Token}, wire.Registration{Name: "entry-node"}, 201, &node)
+	testRequest(t, admin, "POST", base+"/node/register", map[string]string{"Authorization": "Bearer " + enrollment.Token},
+		wire.Registration{Name: "localhost", Region: "Private region"}, 201, &node)
 	headers := map[string]string{"Authorization": "Bearer " + node.Token, "X-Node-ID": fmt.Sprint(node.ID)}
 	testRequest(t, admin, "POST", base+"/node/sync", headers, wire.Heartbeat{AcceptLinkProbe: true}, 200, nil)
 	ruleURL := fmt.Sprintf("%s/rules/%d", base, saved.ID)
 	testRequest(t, member, "POST", ruleURL+"/diagnose", nil, nil, 200, nil)
+	entry.Routing.StatusVisibility = "admin"
+	testRequest(t, admin, "PUT", entryURL, nil, entry, 200, nil)
+	var status struct{ Nodes []entryDiagnostic }
+	testRequest(t, admin, "POST", ruleURL+"/diagnose?status=1", nil, nil, 200, &status)
+	if len(status.Nodes) != 1 || status.Nodes[0].Region != "Private region" || status.Nodes[0].ID != node.ID {
+		t.Fatalf("administrator did not receive the node identity: %+v", status.Nodes)
+	}
+	status.Nodes = nil
+	testRequest(t, member, "POST", ruleURL+"/diagnose?status=1", nil, nil, 200, &status)
+	if len(status.Nodes) != 1 || status.Nodes[0].Name != "入口 1" || status.Nodes[0].ID != 0 ||
+		status.Nodes[0].Region != "" || status.Nodes[0].CountryCode != "" {
+		t.Fatalf("private node identity exposed: %+v", status.Nodes)
+	}
 	links := []wire.LinkProbe{{Network: "tcp", Lane: "primary", MeasuresTarget: true,
 		Traces: []wire.RouteTrace{{Steps: []wire.ProbeStep{{Status: "ok", LatencyMS: 4}}}}}}
 	panel.saveRuleProbe(context.Background(), saved.ID, links)

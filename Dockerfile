@@ -18,10 +18,38 @@ COPY --from=ui /src/web/dist web/dist
 ARG HOPX_VERSION=dev
 RUN CGO_ENABLED=0 go build -trimpath -tags webdist -ldflags="-s -w -X main.version=$HOPX_VERSION" -o /out/hopx-panel ./cmd/hopx-panel
 
+FROM --platform=$BUILDPLATFORM alpine:3.22 AS haproxy-source
+RUN apk add --no-cache curl
+ARG HAPROXY_VERSION=3.2.27
+ARG HAPROXY_SHA256=3363a337dcde55a871b0f63ac483a4476db647418b85dee069b35f39291ee177
+WORKDIR /build
+RUN curl --proto '=https' -fsS "https://www.haproxy.org/download/3.2/src/haproxy-${HAPROXY_VERSION}.tar.gz" -o source.tar.gz \
+    && echo "${HAPROXY_SHA256}  source.tar.gz" | sha256sum -c
+
+FROM --platform=linux/amd64 alpine:3.22 AS haproxy-amd64
+RUN apk add --no-cache build-base linux-headers
+WORKDIR /build
+COPY --from=haproxy-source /build/source.tar.gz ./
+RUN tar -xzf source.tar.gz --strip-components=1 \
+    && make -j4 TARGET=linux-musl LDFLAGS=-static USE_LUA= USE_OPENSSL= USE_PCRE= USE_PCRE2= USE_ZLIB= \
+    && strip haproxy && gzip -n -9 -c haproxy > /haproxy.gz
+
+FROM --platform=linux/arm64 alpine:3.22 AS haproxy-arm64
+RUN apk add --no-cache build-base linux-headers
+WORKDIR /build
+COPY --from=haproxy-source /build/source.tar.gz ./
+RUN tar -xzf source.tar.gz --strip-components=1 \
+    && make -j4 TARGET=linux-musl LDFLAGS=-static USE_LUA= USE_OPENSSL= USE_PCRE= USE_PCRE2= USE_ZLIB= \
+    && strip haproxy && gzip -n -9 -c haproxy > /haproxy.gz
+
 FROM go-source AS node-build
 ARG HOPX_VERSION=dev
-RUN CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -trimpath -ldflags="-s -w -X main.version=$HOPX_VERSION" -o /out/hopx-node-linux-amd64 ./cmd/hopx-node
-RUN CGO_ENABLED=0 GOOS=linux GOARCH=arm64 go build -trimpath -ldflags="-s -w -X main.version=$HOPX_VERSION" -o /out/hopx-node-linux-arm64 ./cmd/hopx-node
+COPY --from=haproxy-amd64 /haproxy.gz /tmp/haproxy-amd64.gz
+COPY --from=haproxy-arm64 /haproxy.gz /tmp/haproxy-arm64.gz
+RUN cp /tmp/haproxy-amd64.gz internal/node/haproxy.gz \
+    && CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -tags bundledhaproxy -trimpath -ldflags="-s -w -X main.version=$HOPX_VERSION" -o /out/hopx-node-linux-amd64 ./cmd/hopx-node
+RUN cp /tmp/haproxy-arm64.gz internal/node/haproxy.gz \
+    && CGO_ENABLED=0 GOOS=linux GOARCH=arm64 go build -tags bundledhaproxy -trimpath -ldflags="-s -w -X main.version=$HOPX_VERSION" -o /out/hopx-node-linux-arm64 ./cmd/hopx-node
 
 FROM go-source AS release-verifiers
 RUN CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -trimpath -ldflags="-s -w" -o /verify/verify-amd64 ./cmd/hopx-release-verify
@@ -30,6 +58,7 @@ RUN CGO_ENABLED=0 GOOS=linux GOARCH=arm64 go build -trimpath -ldflags="-s -w" -o
 FROM scratch AS node-artifacts
 COPY --from=node-build /out/ /
 COPY --from=release-verifiers /verify/ /
+COPY --from=haproxy-source /build/source.tar.gz /haproxy-source.tar.gz
 
 FROM alpine:3.22 AS geoip
 COPY assets/geoip/country.mmdb.gz /tmp/country.mmdb.gz

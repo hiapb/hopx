@@ -559,7 +559,6 @@ function Root() {
             primaryShadow: "none",
             primaryColor: dark ? "#131b29" : "#ffffff",
           },
-          Modal: { borderRadiusLG: 14, titleFontSize: 17 },
         },
       }}
     >

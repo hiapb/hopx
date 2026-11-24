@@ -94,6 +94,7 @@ make_release() (
   trap 'if [[ -n $container ]]; then docker rm "$container" >/dev/null 2>&1 || true; fi
         if [[ -n $build_dir ]]; then
           rm -f -- "$build_dir/hopx-node-linux-amd64" "$build_dir/hopx-node-linux-arm64" "$build_dir/verify-amd64" "$build_dir/verify-arm64"
+          rm -f -- "$build_dir/haproxy-source.tar.gz"
           rmdir -- "$build_dir"
         fi
         rm -rf -- "$signing_dir"' EXIT
@@ -102,6 +103,7 @@ make_release() (
   if [[ -n $source ]]; then
     build_dir=$(mktemp -d)
     docker build --target node-artifacts --output "type=local,dest=$build_dir" --build-arg "HOPX_VERSION=$version" "$source"
+    install -m 0644 "$build_dir/haproxy-source.tar.gz" "$artifacts/haproxy-source.tar.gz"
   fi
   container=$(docker create "$image")
   for arch in amd64 arm64; do

@@ -12,7 +12,7 @@ import {
   Stethoscope,
 } from "lucide-react";
 import { api, bytes, date, useData } from "./api";
-import type { Group, Node, User } from "./api";
+import type { Group, Node, NodeBandwidth, User } from "./api";
 import IconAction from "./icon-action";
 import { NodeFlag, nodeDisplayName, nodeRegion } from "./node-location";
 
@@ -40,14 +40,39 @@ function ResourceUsage({ node }: { node: Node }) {
   </dl>;
 }
 
-function TrafficRates({ outbound, inbound }: { outbound: number; inbound: number }) {
+function TrafficRates({ bandwidth, online = true }: { bandwidth: NodeBandwidth; online?: boolean }) {
   return <dl className="node-speeds">
-    <div><dt aria-label="上行"><ArrowUp size={13} aria-hidden="true" /></dt><dd>{speed(outbound)}</dd></div>
-    <div><dt aria-label="下行"><ArrowDown size={13} aria-hidden="true" /></dt><dd>{speed(inbound)}</dd></div>
+    {[
+      { label: "上行", rate: bandwidth.outMbps, total: bandwidth.outBytes, Icon: ArrowUp },
+      { label: "下行", rate: bandwidth.inMbps, total: bandwidth.inBytes, Icon: ArrowDown },
+    ].map(({ label, rate, total, Icon }) => <div key={label}>
+      <dt><Icon size={13} aria-hidden="true" />{label}</dt>
+      <dd>
+        <strong>{online ? speed(rate) : "—"}</strong>
+        <span>累计 {bandwidth.hasTotals ? bytes(total) : "—"}</span>
+      </dd>
+    </div>)}
   </dl>;
 }
 
+function sumBandwidth(nodes: Node[]) {
+  const bandwidth = { inMbps: 0, outMbps: 0, inBytes: 0, outBytes: 0, hasTotals: false };
+  for (const node of nodes) {
+    if (node.online) {
+      bandwidth.inMbps += node.metrics.inMbps;
+      bandwidth.outMbps += node.metrics.outMbps;
+    }
+    if (node.metrics.hasTotals) {
+      bandwidth.hasTotals = true;
+      bandwidth.inBytes += node.metrics.inBytes ?? 0;
+      bandwidth.outBytes += node.metrics.outBytes ?? 0;
+    }
+  }
+  return bandwidth;
+}
+
 type Event = { items: Node[]; removed: number[] };
+type BandwidthEvent = { id: number; bandwidth: NodeBandwidth };
 type Sample = {
   timestamp: number;
   cpu: number;
@@ -170,42 +195,74 @@ export default function Nodes({ user, lookingGlass }: { user: User; lookingGlass
     finally{setProbePending(false)}
   }
   useEffect(() => {
-    const stream = new EventSource("/api/nodes/events");
+    let stream: EventSource | undefined;
     let alive = true;
-    let reset = true;
-    stream.onopen = () => {
-      reset = true;
-      setConnected(true);
-    };
-    stream.onerror = () => {
-      reset = true;
-      setConnected(false);
-    };
-    stream.onmessage = (event) => {
-      const { items, removed } = JSON.parse(event.data) as Event;
-      setReceived(true);
-      setNodeError("");
-      const replace = reset;
-      reset = false;
-      setNodes((current) => {
-        const next = replace ? {} : { ...current };
-        for (const node of items) next[node.id] = node;
-        for (const id of removed) delete next[id];
-        return next;
+    let hasSnapshot = false;
+    function updateStream() {
+      if (document.hidden) {
+        stream?.close();
+        stream = undefined;
+        setConnected(false);
+        return;
+      }
+      if (stream) return;
+      const source = new EventSource("/api/nodes/events");
+      stream = source;
+      let reset = true;
+      source.onopen = () => {
+        reset = true;
+        setConnected(true);
+      };
+      source.onerror = () => {
+        reset = true;
+        setConnected(false);
+      };
+      source.onmessage = (event) => {
+        const { items, removed } = JSON.parse(event.data) as Event;
+        hasSnapshot = true;
+        setReceived(true);
+        setNodeError("");
+        const replace = reset;
+        reset = false;
+        if (!replace && items.length + removed.length === 0) return;
+        setNodes((current) => {
+          const next = replace ? {} : { ...current };
+          for (const node of items) next[node.id] = node;
+          for (const id of removed) delete next[id];
+          return next;
+        });
+      };
+      source.addEventListener("bandwidth", (event: MessageEvent<string>) => {
+        if (reset) return;
+        const changes = JSON.parse(event.data) as BandwidthEvent[];
+        setNodes((current) => {
+          const next = { ...current };
+          for (const { id, bandwidth } of changes) {
+            const node = current[id];
+            if (node?.online) {
+              const { inMbps, outMbps, inBytes, outBytes, hasTotals } = bandwidth;
+              next[id] = { ...node, metrics: { ...node.metrics, inMbps, outMbps, inBytes, outBytes, hasTotals } };
+            }
+          }
+          return next;
+        });
       });
-    };
+    }
+    updateStream();
+    document.addEventListener("visibilitychange", updateStream);
     void api<Node[]>("/nodes")
       .then((items) => {
-        if (!alive || !reset) return;
+        if (!alive || hasSnapshot) return;
         setNodes(Object.fromEntries(items.map((n) => [n.id, n])));
         setReceived(true);
       })
       .catch((error: Error) => {
-        if (alive && reset) setNodeError(error.message);
+        if (alive && !hasSnapshot) setNodeError(error.message);
       });
     return () => {
       alive = false;
-      stream.close();
+      stream?.close();
+      document.removeEventListener("visibilitychange", updateStream);
     };
   }, []);
   const visibleGroups = groups.value.filter(g => g.onlineDevices !== undefined);
@@ -233,11 +290,12 @@ export default function Nodes({ user, lookingGlass }: { user: User; lookingGlass
   });
   const active = detail === undefined ? undefined : nodes[detail];
   const historyPeak = history.reduce((peak, point) => Math.max(peak, point.in, point.out), 0);
+  const bandwidth = sumBandwidth(visibleNodes);
   const summary = [
     { label: "在线节点", value: onlineNodes.length, total: visibleNodes.length, icon: Server },
     { label: "离线节点", value: visibleNodes.length - onlineNodes.length, icon: Activity },
-    { label: "实时上行", value: speed(onlineNodes.reduce((sum, node) => sum + node.metrics.outMbps, 0)), icon: ArrowUp },
-    { label: "实时下行", value: speed(onlineNodes.reduce((sum, node) => sum + node.metrics.inMbps, 0)), icon: ArrowDown },
+    { label: "实时上行", value: speed(bandwidth.outMbps), cumulative: bandwidth.hasTotals ? bytes(bandwidth.outBytes) : "—", icon: ArrowUp },
+    { label: "实时下行", value: speed(bandwidth.inMbps), cumulative: bandwidth.hasTotals ? bytes(bandwidth.inBytes) : "—", icon: ArrowDown },
   ];
 
   function showDetails(id: number) {
@@ -280,11 +338,12 @@ export default function Nodes({ user, lookingGlass }: { user: User; lookingGlass
           description={[rollout.name, rollout.reason].filter(Boolean).join(" · ")}
           action={rollout.phase === "paused" && <Button size="small" loading={resumingRollout} onClick={() => void resumeRollout()}>跳过并继续</Button>} />}
       <dl className="probe-overview">
-        {summary.map(({ label, value, total, icon: Icon }) => <div key={label}>
+        {summary.map(({ label, value, total, cumulative, icon: Icon }) => <div key={label}>
           <dt><Icon size={16} aria-hidden="true" />{label}</dt>
           <dd>{loading || (!received && nodeError) ? "—" : value}
             {!loading && received && total !== undefined && <small> / {total}</small>}
           </dd>
+          {cumulative !== undefined && !loading && received && <dd className="probe-overview-total">网卡累计 {cumulative}</dd>}
         </div>)}
       </dl>
       <div className="probe-filters">
@@ -335,10 +394,7 @@ export default function Nodes({ user, lookingGlass }: { user: User; lookingGlass
                     </div>
                     <span className="node-count">{running.length} / {all.length} 在线</span>
                   </div>
-                  {all.length > 0 && <TrafficRates
-                    outbound={running.reduce((sum, node) => sum + node.metrics.outMbps, 0)}
-                    inbound={running.reduce((sum, node) => sum + node.metrics.inMbps, 0)}
-                  />}
+                  {all.length > 0 && <TrafficRates bandwidth={sumBandwidth(all)} />}
                 </header>
                 {matches.length > 0 ? <Table<Node>
                   className="node-table"
@@ -351,7 +407,7 @@ export default function Nodes({ user, lookingGlass }: { user: User; lookingGlass
                     {
                       title: "节点",
                       key: "name",
-                      width: narrow ? undefined : "26%",
+                      width: narrow ? undefined : "23%",
                       render: (_, node) => (
                         <div className="probe-node">
                           <div className="probe-node-heading">
@@ -368,7 +424,7 @@ export default function Nodes({ user, lookingGlass }: { user: User; lookingGlass
                           </p>}
                           {narrow && <div className="probe-mobile-metrics">
                             {renderAddresses(node)}
-                            {node.online && <TrafficRates outbound={node.metrics.outMbps} inbound={node.metrics.inMbps} />}
+                            <TrafficRates bandwidth={node.metrics} online={node.online} />
                             <ResourceUsage node={node} />
                           </div>}
                           {narrow && <div className="probe-actions">
@@ -382,19 +438,23 @@ export default function Nodes({ user, lookingGlass }: { user: User; lookingGlass
                       {
                         title: "出口 IP",
                         key: "address",
-                        width: "24%",
+                        width: "21%",
+                        shouldCellUpdate: (node: Node, previous: Node) =>
+                          node.address !== previous.address || node.ipv4 !== previous.ipv4 || node.ipv6 !== previous.ipv6,
                         render: (_: unknown, node: Node) => renderAddresses(node) || "—",
                       },
                       {
-                        title: "实时带宽",
+                        title: "实时带宽 / 累计流量",
                         key: "traffic",
-                        width: "15%",
-                        render: (_: unknown, node: Node) => node.online ? <TrafficRates outbound={node.metrics.outMbps} inbound={node.metrics.inMbps} /> : "—",
+                        width: "24%",
+                        render: (_: unknown, node: Node) => <TrafficRates bandwidth={node.metrics} online={node.online} />,
                       },
                       {
                         title: "资源占用",
                         key: "resources",
                         width: "24%",
+                        shouldCellUpdate: (node: Node, previous: Node) => node.online !== previous.online ||
+                          resources.some(([key]) => node.metrics[key] !== previous.metrics[key]),
                         render: (_: unknown, node: Node) => <ResourceUsage node={node} />,
                       },
                       {
@@ -445,6 +505,10 @@ export default function Nodes({ user, lookingGlass }: { user: User; lookingGlass
         {active && (
           <div className="details-grid probe-detail-grid">
             <div className="probe-detail-resources"><ResourceUsage node={active} /></div>
+            <div className="probe-detail-bandwidth">
+              <TrafficRates bandwidth={active.metrics} online={active.online} />
+              <p className="muted">累计流量取自节点网卡，网卡计数重置后重新累计。</p>
+            </div>
             <dl>
               <dt>地区</dt>
               <dd className="node-name"><NodeFlag node={active} />{active.region || nodeRegion(active) || "—"}</dd>

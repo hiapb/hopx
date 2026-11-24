@@ -2,6 +2,8 @@ package node
 
 import (
 	"bufio"
+	"context"
+	"net/http"
 	"os"
 	"strconv"
 	"strings"
@@ -11,11 +13,39 @@ import (
 	"hopx/internal/wire"
 )
 
+func reportBandwidth(ctx context.Context, client *http.Client, panel, iface string, identity wire.Identity) {
+	sampler := networkSampler{iface: iface}
+	sampler.sample()
+	tick := time.NewTicker(time.Second)
+	defer tick.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-tick.C:
+			metrics := sampler.sample()
+			if metrics.HasTotals {
+				request, cancel := context.WithTimeout(ctx, 900*time.Millisecond)
+				_ = api(request, client, panel, "/api/node/bandwidth", identity.Token, identity.ID, metrics, nil)
+				cancel()
+			}
+		}
+	}
+}
+
 type sampler struct {
-	iface                     string
-	last                      time.Time
-	cpuTotal, cpuIdle, rx, tx uint64
-	proc                      procReader
+	cpuTotal, cpuIdle uint64
+	network           networkSampler
+	proc              procReader
+}
+
+type networkSampler struct {
+	iface      string
+	defaultNIC string
+	refreshAt  time.Time
+	last       time.Time
+	rx, tx     int64
+	proc       procReader
 }
 
 func number(v string) uint64 { n, _ := strconv.ParseUint(v, 10, 64); return n }
@@ -94,35 +124,75 @@ func (s *sampler) sample(dir string) wire.Metrics {
 		seconds, _ := strconv.ParseFloat(values[0], 64)
 		m.Uptime = int64(seconds)
 	}
-	interfaces := make(map[string]bool)
-	for raw := range strings.SplitSeq(s.iface, ",") {
-		if name := strings.TrimSpace(raw); name != "" && name != "lo" {
-			interfaces[name] = true
-		}
-	}
-	if len(interfaces) == 0 {
-		s.proc.lines("/proc/net/route", func(f []string) {
-			if len(f) > 1 && f[1] == "00000000" && len(interfaces) == 0 {
-				interfaces[f[0]] = true
-			}
-		})
-	}
-	var rx, tx uint64
-	s.proc.lines("/proc/net/dev", func(f []string) {
-		if interfaces[strings.TrimSuffix(f[0], ":")] && len(f) > 9 {
-			rx += number(f[1])
-			tx += number(f[9])
-		}
-	})
-	now := time.Now()
-	if !s.last.IsZero() && rx >= s.rx && tx >= s.tx {
-		seconds := now.Sub(s.last).Seconds()
-		m.InMbps = float64(rx-s.rx) * 8 / 1e6 / seconds
-		m.OutMbps = float64(tx-s.tx) * 8 / 1e6 / seconds
-	}
-	s.last, s.rx, s.tx = now, rx, tx
+	m.Bandwidth = s.network.sample()
 	m.Disk = diskUsage(dir)
 	return m
+}
+
+func (s *networkSampler) sample() wire.Bandwidth {
+	now := time.Now()
+	if s.iface == "" && !now.Before(s.refreshAt) {
+		var nic string
+		s.proc.lines("/proc/net/route", func(f []string) {
+			if len(f) > 1 && f[1] == "00000000" && f[0] != "lo" && nic == "" {
+				nic = f[0]
+			}
+		})
+		if nic == "" {
+			s.proc.lines("/proc/net/ipv6_route", func(f []string) {
+				if len(f) >= 10 && f[0] == "00000000000000000000000000000000" && f[1] == "00" && f[9] != "lo" && nic == "" {
+					nic = f[9]
+				}
+			})
+		}
+		if s.defaultNIC != nic {
+			s.last = time.Time{}
+			s.defaultNIC = nic
+		}
+		s.refreshAt = now.Add(30 * time.Second)
+	}
+	var sample wire.Bandwidth
+	s.proc.lines("/proc/net/dev", func(f []string) {
+		if len(f) < 10 || !strings.HasSuffix(f[0], ":") {
+			return
+		}
+		nic := strings.TrimSuffix(f[0], ":")
+		if nic == "lo" {
+			return
+		}
+		if s.iface != "" {
+			selected := false
+			for name := range strings.SplitSeq(s.iface, ",") {
+				if strings.TrimSpace(name) == nic {
+					selected = true
+					break
+				}
+			}
+			if !selected {
+				return
+			}
+		} else if s.defaultNIC != "" && nic != s.defaultNIC {
+			return
+		}
+		rx, rxErr := strconv.ParseInt(f[1], 10, 64)
+		tx, txErr := strconv.ParseInt(f[9], 10, 64)
+		if rxErr == nil && txErr == nil && rx >= 0 && tx >= 0 {
+			sample.HasTotals = true
+			sample.InBytes += rx
+			sample.OutBytes += tx
+		}
+	})
+	if !sample.HasTotals {
+		s.last = time.Time{}
+		return sample
+	}
+	if !s.last.IsZero() && now.After(s.last) {
+		seconds := now.Sub(s.last).Seconds()
+		sample.InMbps = float64(max(0, sample.InBytes-s.rx)) * 8 / 1e6 / seconds
+		sample.OutMbps = float64(max(0, sample.OutBytes-s.tx)) * 8 / 1e6 / seconds
+	}
+	s.last, s.rx, s.tx = now, sample.InBytes, sample.OutBytes
+	return sample
 }
 
 func clamp(v float64) float64 { return min(100, max(0, v)) }

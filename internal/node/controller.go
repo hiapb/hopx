@@ -22,6 +22,7 @@ import (
 	"slices"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"hopx/internal/certificate"
@@ -117,6 +118,9 @@ func api(ctx context.Context, client *http.Client, panel, path, key string, id i
 		b, _ := io.ReadAll(io.LimitReader(resp.Body, 1024))
 		return controlError{status: resp.StatusCode, text: strings.TrimSpace(string(b))}
 	}
+	if resp.StatusCode == http.StatusNoContent {
+		return nil
+	}
 	return json.NewDecoder(io.LimitReader(resp.Body, 64<<20)).Decode(output)
 }
 
@@ -203,6 +207,7 @@ func Run(ctx context.Context, settings Settings) error {
 	}
 	engine := NewEngine(settings.Bind, maxListeners, maxConnections)
 	engine.proxy.binary, _ = exec.LookPath("haproxy")
+	engine.proxy.stateDir = settings.Directory
 	if settings.UDPSmartBind {
 		engine.udpBind, e = interfaceUDPAddresses()
 		if e != nil {
@@ -349,7 +354,7 @@ func Run(ctx context.Context, settings Settings) error {
 	}
 	generation := rand.Text()
 	var gauge sampler
-	gauge.iface = settings.Interface
+	gauge.network.iface = settings.Interface
 	var candidateVersion string
 	var retryAfter time.Time
 	attempts := 0
@@ -361,10 +366,14 @@ func Run(ctx context.Context, settings Settings) error {
 	var stopNative context.CancelFunc
 	var nativeErr, relayModeErr string
 	var relayModeRetry time.Time
+	var stopBandwidth context.CancelFunc
 	key := hmac.New(sha256.New, []byte(state.RelayKey))
 	_, _ = key.Write([]byte("hopx DTLS relay key v1"))
 	nativeKey := hex.EncodeToString(key.Sum(nil))
 	defer func() {
+		if stopBandwidth != nil {
+			stopBandwidth()
+		}
 		if stopNative != nil {
 			stopNative()
 			nativeListener.Close()
@@ -375,6 +384,7 @@ func Run(ctx context.Context, settings Settings) error {
 			return nil
 		}
 		delay := settings.Period
+		engine.mux.SweepIdle()
 		report, reportErr := prepareReport(engine, spool)
 		if reportErr != nil {
 			slog.Warn("traffic spool", "error", reportErr)
@@ -409,15 +419,17 @@ func Run(ctx context.Context, settings Settings) error {
 		heartbeat.QuotaGeneration, heartbeat.QuotaClaims = generation, engine.quota.claims(false)
 		heartbeat.ApplyError = localMessage(settings.Directory, "apply.error")
 		heartbeat.UpdateError = localMessage(settings.Directory, "update.error")
-		if engine.proxy.binary == "" {
-			engine.proxy.binary, _ = exec.LookPath("haproxy")
-		}
-		heartbeat.AcceptHAProxy = engine.proxy.binary != ""
+		heartbeat.AcceptHAProxy = engine.proxy.available()
+		heartbeat.AcceptHAProxyHandoff = true
 		heartbeat.AcceptPortCheck = true
 		metrics.TCPConnections += int64(engine.proxy.connections)
 		heartbeat.Metrics = metrics
 		var reply wire.Sync
 		if e = api(ctx, client, settings.Panel, "/api/node/sync", state.Token, state.ID, heartbeat, &reply); e != nil {
+			if stopBandwidth != nil {
+				stopBandwidth()
+				stopBandwidth = nil
+			}
 			var control controlError
 			if errors.As(e, &control) && control.status == http.StatusUnauthorized {
 				_ = atomicFile(filepath.Join(settings.Directory, "revoked"), []byte("registration revoked\n"), 0600)
@@ -432,6 +444,14 @@ func Run(ctx context.Context, settings Settings) error {
 			slog.Warn("panel sync", "error", e)
 			delay = max(delay, 10*time.Second)
 		} else {
+			if reply.LiveBandwidth && stopBandwidth == nil {
+				var bandwidthContext context.Context
+				bandwidthContext, stopBandwidth = context.WithCancel(ctx)
+				go reportBandwidth(bandwidthContext, client, settings.Panel, settings.Interface, state.Identity)
+			} else if !reply.LiveBandwidth && stopBandwidth != nil {
+				stopBandwidth()
+				stopBandwidth = nil
+			}
 			if len(reply.MeterKey) == 32 && reply.MeterGroup > 0 {
 				current := engine.meter.Load()
 				if current == nil || current.group != reply.MeterGroup || !slices.Equal(current.key, reply.MeterKey) {
@@ -835,6 +855,9 @@ func (e *Engine) checkRuleRoutes(ctx context.Context, task wire.DiagnosticTask) 
 }
 
 func probeRuleLinks(ctx context.Context, active *ruleRuntime, task wire.DiagnosticTask) []wire.LinkProbe {
+	if len(active.rule.Targets) == 0 {
+		return nil
+	}
 	type lane struct {
 		wire.LinkProbe
 		paths []*relay.Session
@@ -856,37 +879,42 @@ func probeRuleLinks(ctx context.Context, active *ruleRuntime, task wire.Diagnost
 	}
 	ctx, cancel := context.WithTimeout(ctx, 5*time.Second)
 	defer cancel()
-	for attempt := 0; attempt < min(task.ProbeSamples, 3) && ctx.Err() == nil; attempt++ {
-		for i := range lanes {
-			lane := &lanes[i]
-			if len(lane.paths) == 0 || ctx.Err() != nil {
-				continue
-			}
-			targets := active.rule.Targets
-			offset := uint64(max(0, task.ProbeOffset)) + uint64(attempt)
-			perTry, done := context.WithTimeout(ctx, 1100*time.Millisecond)
-			path := lane.paths[offset%uint64(len(lane.paths))]
-			target := targets[offset%uint64(len(targets))]
-			address := target
-			publicOnly := (lane.Lane == "primary" && active.rule.PublicTargets) || (lane.Lane == "backup" && active.rule.PublicBackupTargets)
-			if publicOnly {
-				var err error
-				address, _, err = resolvePublicTarget(perTry, target)
-				if err != nil {
-					if errors.Is(err, errPrivateDestination) {
-						lane.Traces = append(lane.Traces, wire.RouteTrace{Target: target,
-							Steps: []wire.ProbeStep{{Phase: "target_policy", Status: "failed"}}})
-					}
-					done()
-					continue
-				}
-			}
-			trace := path.Probe(perTry, lane.Network, address, active.rule.UDPProbe)
-			trace.Target = target
-			lane.Traces = append(lane.Traces, trace)
-			done()
+	samples := min(task.ProbeSamples, 3)
+	targets := active.rule.Targets
+	var checks sync.WaitGroup
+	for i := range lanes {
+		lane := &lanes[i]
+		if len(lane.paths) == 0 {
+			continue
 		}
+		checks.Go(func() {
+			for attempt := 0; attempt < samples && ctx.Err() == nil; attempt++ {
+				offset := uint64(max(0, task.ProbeOffset)) + uint64(attempt)
+				perTry, done := context.WithTimeout(ctx, 1100*time.Millisecond)
+				path := lane.paths[offset%uint64(len(lane.paths))]
+				target := targets[offset%uint64(len(targets))]
+				address := target
+				publicOnly := (lane.Lane == "primary" && active.rule.PublicTargets) || (lane.Lane == "backup" && active.rule.PublicBackupTargets)
+				if publicOnly {
+					var err error
+					address, _, err = resolvePublicTarget(perTry, target)
+					if err != nil {
+						if errors.Is(err, errPrivateDestination) {
+							lane.Traces = append(lane.Traces, wire.RouteTrace{Target: target,
+								Steps: []wire.ProbeStep{{Phase: "target_policy", Status: "failed"}}})
+						}
+						done()
+						continue
+					}
+				}
+				trace := path.Probe(perTry, lane.Network, address, active.rule.UDPProbe)
+				trace.Target = target
+				lane.Traces = append(lane.Traces, trace)
+				done()
+			}
+		})
 	}
+	checks.Wait()
 	results := make([]wire.LinkProbe, len(lanes))
 	for i, lane := range lanes {
 		results[i] = lane.LinkProbe

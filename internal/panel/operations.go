@@ -288,6 +288,7 @@ func (s *Server) resetGroupCredentials(ctx context.Context, groupID int64) error
 	for id, device := range s.devices {
 		if device.GroupID == groupID {
 			delete(s.devices, id)
+			s.clearNodeBandwidth(id)
 			delete(s.diagnostics, id)
 		}
 	}
@@ -555,7 +556,7 @@ func (s *Server) folderCounts(w http.ResponseWriter, r *http.Request, query stri
 	respond(w, 200, folders)
 }
 
-func rerouteRule(tx *sql.Tx, u User, id, entry int64, path []int64, updatePath bool) (wire.Rule, error) {
+func (s *Server) rerouteRule(tx *sql.Tx, u User, id, entry int64, path []int64, updatePath bool) (wire.Rule, error) {
 	var rule wire.Rule
 	var raw []byte
 	if err := tx.QueryRow("SELECT json FROM rules WHERE id=?", id).Scan(&raw); err != nil {
@@ -574,7 +575,7 @@ func rerouteRule(tx *sql.Tx, u User, id, entry int64, path []int64, updatePath b
 	if updatePath {
 		rule.Path = path
 	}
-	return rule, storeRule(tx, u, &rule)
+	return rule, s.storeRule(tx, u, &rule)
 }
 
 func (s *Server) userReferral(w http.ResponseWriter, r *http.Request, _ User) {

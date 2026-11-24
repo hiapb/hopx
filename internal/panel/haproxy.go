@@ -1,6 +1,7 @@
 package panel
 
 import (
+	"database/sql"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -8,9 +9,33 @@ import (
 	"net/http"
 	"strconv"
 	"strings"
+	"time"
 
 	"hopx/internal/wire"
 )
+
+func (s *Server) canSwitchHAProxy(tx *sql.Tx, group int64, useProxy bool) (bool, error) {
+	now := time.Now()
+	rows, err := tx.Query(`SELECT id FROM devices WHERE group_id=? AND token NOT LIKE 'revoked:%' AND last_seen>=?`,
+		group, now.Add(-time.Hour).Unix())
+	if err != nil {
+		return false, err
+	}
+	defer rows.Close()
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	for rows.Next() {
+		var id int64
+		if err := rows.Scan(&id); err != nil {
+			return false, err
+		}
+		node := s.devices[id]
+		if !node.AcceptHAProxyHandoff || useProxy && !node.AcceptHAProxy {
+			return false, nil
+		}
+	}
+	return true, rows.Err()
+}
 
 func validateHAProxyRule(owner User, entry wire.DeviceGroup, rule wire.Rule) error {
 	if !owner.Admin {

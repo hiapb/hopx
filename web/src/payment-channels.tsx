@@ -1,6 +1,7 @@
 import { useState } from "react";
 import { Alert, App, Button, Form, Input, InputNumber, Select, Space, Switch, Table, Tag } from "antd";
 import { api, useData } from "./api";
+import { useConfirmAction } from "./confirm-action";
 
 export const paymentKinds: Record<string, string> = {
   epay: "易支付",
@@ -29,7 +30,8 @@ type PaymentChannel = {
 
 export default function PaymentChannels() {
   const channels = useData<PaymentChannel[]>("/admin/payment-channels", []);
-  const { message, modal } = App.useApp();
+  const { message } = App.useApp();
+  const confirmAction = useConfirmAction();
   const [editor, setEditor] = useState<Partial<PaymentChannel>>();
   const [json, setJSON] = useState<string>();
   const [jsonError, setJSONError] = useState("");
@@ -72,14 +74,20 @@ export default function PaymentChannels() {
   }
 
   function archive(row: PaymentChannel) {
-    modal.confirm({
+    confirmAction({
       title: "归档支付通道",
       content: row.name + " 将从收银台移除，已有订单仍可完成支付。",
       okText: "归档",
       onOk: async () => {
-        await api("/admin/payment-channels/" + row.id, "DELETE");
-        if (editor?.id === row.id) setEditor(undefined);
-        await channels.reload();
+        try {
+          await api("/admin/payment-channels/" + row.id, "DELETE");
+          if (editor?.id === row.id) setEditor(undefined);
+          await channels.reload();
+          return true;
+        } catch (error) {
+          message.error((error as Error).message);
+          return false;
+        }
       },
     });
   }

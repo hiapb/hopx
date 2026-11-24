@@ -54,6 +54,7 @@ type Server struct {
 	paymentSecret      string
 	mu                 sync.RWMutex
 	devices            map[int64]wire.Device
+	nodeBandwidth      map[int64]*nodeBandwidth
 	releaseMu          sync.Mutex
 	releaseUntil       time.Time
 	releases           map[string]wire.Release
@@ -144,13 +145,13 @@ func Open(o Options) (*Server, error) {
 		},
 		"users": {
 			"billing_remainder": "INTEGER NOT NULL DEFAULT 0", "quota_epoch": "INTEGER NOT NULL DEFAULT 0",
-			"unlimited_traffic": "INTEGER NOT NULL DEFAULT 0",
+			"unlimited_traffic":     "INTEGER NOT NULL DEFAULT 0",
 			"auto_renew_configured": "INTEGER NOT NULL DEFAULT 0",
 			"rate_override":         "INTEGER", "ips_override": "INTEGER", "connections_override": "INTEGER",
 			"affiliate_balance": "INTEGER NOT NULL DEFAULT 0", "allow_device": "INTEGER NOT NULL DEFAULT 0",
 		},
 		"user_groups":            {"show_order": "INTEGER NOT NULL DEFAULT 0"},
-		"devices":                {"last_seen": "INTEGER NOT NULL DEFAULT 0"},
+		"devices":                {"last_seen": "INTEGER NOT NULL DEFAULT 0", "in_bytes": "INTEGER", "out_bytes": "INTEGER"},
 		"user_referral_settings": {"registration_enabled": "INTEGER NOT NULL DEFAULT 1"},
 		"payment_channels":       {"show_order": "INTEGER NOT NULL DEFAULT 0"},
 		"notifications":          {"topic": "TEXT NOT NULL DEFAULT ''"},
@@ -566,6 +567,7 @@ func (s *Server) Handler() http.Handler {
 	m.HandleFunc("GET /api/register/challenge", s.makeChallenge)
 	m.HandleFunc("POST /api/node/register", s.registerNode)
 	m.HandleFunc("POST /api/node/sync", s.syncNode)
+	m.HandleFunc("POST /api/node/bandwidth", s.updateNodeBandwidth)
 	m.HandleFunc("POST /api/payment/webhook", s.payment)
 	m.HandleFunc("POST /api/telegram/webhook", s.telegramWebhook)
 	user("GET /api/telegram", s.telegramSettings)
