@@ -355,14 +355,44 @@ func (s *Server) logout(w http.ResponseWriter, r *http.Request, u User) {
 
 func (s *Server) register(w http.ResponseWriter, r *http.Request) {
 	var input struct {
-		Name, Password, Invite, ChallengeID string
-		Answer                              int
+		Name, Password, Invite, ChallengeID, TurnstileToken string
+		Answer                                              int
 	}
 	if !decodeLimit(w, r, &input, 4096) {
 		return
 	}
 	if !s.guard.allow(r.RemoteAddr) {
 		fail(w, 429, "请求过于频繁")
+		return
+	}
+	config, err := readRegistrationVerification(s.db)
+	if err != nil {
+		dbFailure(w, err)
+		return
+	}
+	if config.mode == "closed" {
+		fail(w, 403, "注册已关闭")
+		return
+	}
+	switch config.kind {
+	case verificationOff:
+	case verificationArithmetic:
+		if !s.checkChallenge(input.ChallengeID, input.Answer) {
+			fail(w, 400, "注册验证无效或已过期")
+			return
+		}
+	case verificationTurnstile:
+		valid, err := verifyTurnstile(r.Context(), turnstileClient, config.secret, input.TurnstileToken)
+		if err != nil {
+			fail(w, 503, "注册验证暂不可用，请稍后重试")
+			return
+		}
+		if !valid {
+			fail(w, 400, "Turnstile 验证无效或已过期")
+			return
+		}
+	default:
+		fail(w, 503, "注册验证配置无效")
 		return
 	}
 	select {
@@ -372,15 +402,7 @@ func (s *Server) register(w http.ResponseWriter, r *http.Request) {
 		fail(w, 429, "注册繁忙，请稍后再试")
 		return
 	}
-	mode := s.setting("registration", "closed")
-	if mode == "closed" {
-		fail(w, 403, "注册已关闭")
-		return
-	}
-	if s.setting("registrationChallenge", "false") == "true" && !s.checkChallenge(input.ChallengeID, input.Answer) {
-		fail(w, 400, "注册验证无效或已过期")
-		return
-	}
+	mode := config.mode
 	var inviter sql.NullInt64
 	if input.Invite != "" && mode != "no-invite" {
 		if s.db.QueryRow(`SELECT u.id FROM users u LEFT JOIN user_referral_settings rs ON rs.user_id=u.id
@@ -473,9 +495,19 @@ func (s *Server) site(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	homeLinks, _ := parseHomeLinks(s.setting("homeLinks", "[]"))
+	registration, err := readRegistrationVerification(s.db)
+	if err != nil {
+		dbFailure(w, err)
+		return
+	}
+	var turnstileSiteKey string
+	if registration.mode != "closed" && registration.kind == verificationTurnstile {
+		turnstileSiteKey = registration.siteKey
+	}
 	respond(w, 200, map[string]any{
 		"name": s.setting("name", "HopX"), "announcement": s.setting("announcement", ""), "homeLinks": homeLinks,
-		"registration": s.setting("registration", "closed"), "registrationChallenge": s.setting("registrationChallenge", "false"),
+		"registration": registration.mode, "registrationVerification": registration.kind,
+		"registrationChallenge": strconv.FormatBool(registration.kind == verificationArithmetic), "registrationTurnstileSiteKey": turnstileSiteKey,
 		"personalTunnels": s.setting("personalTunnels", "false"), "epay": strconv.FormatBool(slices.Contains(available, "epay")),
 		"paymentGateways": strings.Join(available, ","), "paymentFees": fees, "paymentChannels": options, "minRecharge": s.setting("minRecharge", "100"), "version": s.version,
 		"lookingGlass":      s.setting("lookingGlass", "false"),
@@ -647,7 +679,7 @@ func (s *Server) Handler() http.Handler {
 		w.Header().Set("X-Content-Type-Options", "nosniff")
 		w.Header().Set("X-Frame-Options", "DENY")
 		w.Header().Set("Referrer-Policy", "same-origin")
-		w.Header().Set("Content-Security-Policy", "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob:; object-src 'none'; base-uri 'none'; frame-ancestors 'none'; form-action 'self'")
+		w.Header().Set("Content-Security-Policy", "default-src 'self'; script-src 'self' https://challenges.cloudflare.com; frame-src https://challenges.cloudflare.com; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob:; object-src 'none'; base-uri 'none'; frame-ancestors 'none'; form-action 'self'")
 		if r.TLS != nil || strings.HasPrefix(s.publicURL, "https://") {
 			w.Header().Set("Strict-Transport-Security", "max-age=31536000")
 		}

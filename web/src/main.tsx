@@ -15,6 +15,7 @@ import {
 import zhCN from "antd/locale/zh_CN";
 import {
   Activity,
+  ArrowRight,
   Bell,
   Cable,
   ChevronDown,
@@ -24,6 +25,7 @@ import {
   Gift,
   Home,
   Layers3,
+  LockKeyhole,
   LogOut,
   Menu,
   Moon,
@@ -34,10 +36,12 @@ import {
   Sun,
   Ticket,
   Users,
+  UserRoundPlus,
   Workflow,
 } from "lucide-react";
 import { api, useData } from "./api";
 import type { Site, User } from "./api";
+import Turnstile from "./turnstile";
 import "./styles.css";
 
 class PageModuleError extends Error {
@@ -195,120 +199,137 @@ function HomePage({ site, admin }: { site: Site; admin: boolean }) {
   );
 }
 
+type ArithmeticChallenge = { id: string; left: number; right: number };
+
 function Login({ site, done, invite }: { site: Site; done: () => Promise<void>; invite?: string }) {
-  const [register, setRegister] = useState(Boolean(invite) && site.registration !== "closed");
-  const [challenge, setChallenge] = useState<{
-    id: string;
-    left: number;
-    right: number;
-  }>();
+  const canRegister = site.registration !== "closed";
+  const [showRegister, setShowRegister] = useState(Boolean(invite));
+  const register = canRegister && showRegister;
+  const verification = site.registrationVerification ?? (site.registrationChallenge === "true" ? "arithmetic" : "off");
+  const arithmetic = register && verification === "arithmetic";
+  const turnstile = register && verification === "turnstile";
+  const [turnstileAttempt, setTurnstileAttempt] = useState(0);
+  const challenge = useData<ArithmeticChallenge | null>(arithmetic ? "/register/challenge" : null, null);
+  const [proof, setProof] = useState("");
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState("");
-  async function newChallenge() {
-    try {
-      setChallenge(
-        await api<{ id: string; left: number; right: number }>(
-          "/register/challenge",
-        ),
-      );
-    } catch (e) {
-      setError((e as Error).message);
-    }
+  const [form] = Form.useForm();
+
+  function refreshArithmetic() {
+    form.setFieldValue("answer", undefined);
+    void challenge.reload();
   }
-  useEffect(() => {
-    if (register && site.registrationChallenge === "true") void newChallenge();
-  }, [register, site.registrationChallenge]);
-  async function submit(values: {
-    name: string;
-    password: string;
-    invite?: string;
-    answer?: number;
-  }) {
+
+  function changeMode() {
+    setShowRegister(!showRegister);
+    setError("");
+    setProof("");
+    form.resetFields(["password", "answer"]);
+  }
+
+  async function submit(values: { name: string; password: string; invite?: string; answer?: number }) {
+    if (busy || (arithmetic && (challenge.busy || !challenge.value || challenge.error)) ||
+        (turnstile && !proof)) return;
     setBusy(true);
     setError("");
+    let created = false;
     try {
-      if (register)
+      if (register) {
         await api("/register", "POST", {
           ...values,
-          challengeId: challenge?.id,
+          challengeId: arithmetic ? challenge.value?.id : undefined,
+          turnstileToken: turnstile ? proof : undefined,
         });
-      await api("/login", "POST", values);
+        created = true;
+      }
+      await api("/login", "POST", { name: values.name, password: values.password });
       await done();
     } catch (e) {
-      setError((e as Error).message);
-      if (register && site.registrationChallenge === "true")
-        await newChallenge();
+      if (created) setShowRegister(false);
+      setError(created ? `账号已创建，请重新登录。${(e as Error).message}` : (e as Error).message);
+      if (!created && arithmetic) refreshArithmetic();
+      if (!created && turnstile) {
+        setProof("");
+        setTurnstileAttempt(attempt => attempt + 1);
+      }
     } finally {
       setBusy(false);
     }
   }
+
   return (
     <main className="login-shell">
-      <section className="login">
-        <Brand />
-        <h1>{register ? "注册账号" : "登录转发面板"}</h1>
-        {site.name !== "HopX" && <p>{site.name}</p>}
-        {error && <Alert message={error} type="error" showIcon />}
-        <Form layout="vertical" onFinish={submit} autoComplete="on" initialValues={{ invite }}>
-          <Form.Item
-            name="name"
-            label="账号"
-            rules={[{ required: true, message: "请输入账号" }]}
-          >
-            <Input autoComplete="username" size="large" />
-          </Form.Item>
-          <Form.Item
-            name="password"
-            label="密码"
-            rules={[{ required: true, message: "请输入密码" }]}
-          >
-            <Input.Password
-              autoComplete={register ? "new-password" : "current-password"}
-              size="large"
-            />
-          </Form.Item>
-          {register && site.registration !== "no-invite" && (
-            <Form.Item
-              name="invite"
-              label="邀请码"
-              rules={[
-                {
-                  required: site.registration === "invite",
-                  message: "需要邀请码",
-                },
-              ]}
-            >
-              <Input size="large" />
+      <div className="login-layout">
+        <aside className="login-intro" aria-label="站点介绍">
+          <div className="login-brand">
+            <span className="login-brand-mark"><Workflow size={24} strokeWidth={1.9} aria-hidden="true" /></span>
+            <strong>{site.name || "HopX"}</strong>
+          </div>
+          <div className="login-intro-copy">
+            <h2>你的转发工作台</h2>
+            <p>管理转发规则、链式出口和节点状态。</p>
+          </div>
+          <div className="login-route" aria-hidden="true">
+            <div className="login-route-header">
+              <span className="login-route-dots"><i /><i /><i /></span>
+              <span>TCP / UDP</span>
+            </div>
+            <div className="login-route-track">
+              <span><Cable size={19} />入口</span>
+              <b></b>
+              <span><Layers3 size={19} />中转</span>
+              <b></b>
+              <span><Activity size={19} />出口</span>
+            </div>
+          </div>
+        </aside>
+        <section className="login" aria-labelledby="login-title">
+          <header className="login-heading">
+            <span className="login-heading-icon">{register ? <UserRoundPlus size={22} aria-hidden="true" /> : <LockKeyhole size={22} aria-hidden="true" />}</span>
+            <h1 id="login-title">{register ? "注册账号" : `登录 ${site.name || "HopX"}`}</h1>
+            {register && <p>{site.registration === "invite" ? "填写账号、密码和邀请码。" : "创建账号以使用转发服务。"}</p>}
+          </header>
+          {error && <Alert message={error} type="error" showIcon />}
+          <Form form={form} layout="vertical" onFinish={submit} autoComplete="on" initialValues={{ invite }}>
+            <Form.Item name="name" label="账号" rules={[{ required: true, message: "请输入账号" }]}>
+              <Input autoComplete="username" size="large" placeholder="输入账号" />
             </Form.Item>
-          )}
-          {register && challenge && (
-            <Form.Item
-              name="answer"
-              label={`注册验证 · ${challenge.left} + ${challenge.right}`}
-              rules={[{ required: true, message: "请输入运算结果" }]}
-            >
-              <InputNumber precision={0} min={0} style={{ width: "100%" }} />
+            <Form.Item name="password" label="密码" rules={[{ required: true, message: "请输入密码" }]}>
+              <Input.Password autoComplete={register ? "new-password" : "current-password"} size="large" placeholder="输入密码" />
             </Form.Item>
+            {register && site.registration !== "no-invite" && (
+              <Form.Item name="invite" label={site.registration === "invite" ? "邀请码" : "邀请码（选填）"}
+                rules={[{ required: site.registration === "invite", message: "需要邀请码" }]}>
+                <Input size="large" placeholder="输入邀请码" />
+              </Form.Item>
+            )}
+            {arithmetic && (
+              <div className="login-arithmetic">
+                <Form.Item name="answer" label={challenge.value ? `注册验证 · ${challenge.value.left} + ${challenge.value.right}` : "注册验证"}
+                  rules={[{ required: true, message: "请输入运算结果" }]}>
+                  <InputNumber precision={0} min={0} size="large" placeholder="输入运算结果" disabled={challenge.busy || !challenge.value} />
+                </Form.Item>
+                <Button type="link" size="small" loading={challenge.busy} onClick={refreshArithmetic}>换一题</Button>
+              </div>
+            )}
+            {arithmetic && challenge.error && <Alert message={challenge.error} type="warning" showIcon />}
+            {turnstile && (site.registrationTurnstileSiteKey
+              ? <Turnstile key={turnstileAttempt} siteKey={site.registrationTurnstileSiteKey} onToken={setProof} />
+              : <Alert type="error" showIcon message="站点尚未配置 Turnstile 公钥" />)}
+            <Button className="login-submit" block size="large" type="primary" htmlType="submit" loading={busy}
+              icon={<ArrowRight size={17} aria-hidden="true" />} iconPosition="end"
+              disabled={arithmetic && (challenge.busy || !challenge.value || !!challenge.error) || turnstile && !proof}>
+              {register ? "注册并登录" : "登录"}
+            </Button>
+          </Form>
+          {canRegister && (
+            <div className="login-mode">
+              <span>{register ? "已有账号？" : "没有账号？"}</span>
+              <Button type="link" onClick={changeMode} disabled={busy}>{register ? "返回登录" : "注册账号"}</Button>
+            </div>
           )}
-          <Button
-            block
-            size="large"
-            type="primary"
-            htmlType="submit"
-            loading={busy}
-            disabled={
-              register && site.registrationChallenge === "true" && !challenge
-            }
-          >
-            {register ? "注册并登录" : "登录"}
-          </Button>
-        </Form>
-        {site.registration !== "closed" && (
-          <Button type="link" onClick={() => setRegister(!register)}>
-            {register ? "返回登录" : "注册账号"}
-          </Button>
-        )}
-      </section>
+        </section>
+      </div>
     </main>
   );
 }

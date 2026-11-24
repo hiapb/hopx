@@ -16,7 +16,7 @@ import {
   Modal,
   Pagination,
   QRCode,
-  Radio,
+  Segmented,
   Select,
   Space,
   Spin,
@@ -30,6 +30,9 @@ import {
   CalendarDays,
   ChevronDown,
   ChevronRight,
+  Copy,
+  Download,
+  Globe,
   Ellipsis,
   FileJson,
   Gauge,
@@ -45,6 +48,7 @@ import {
   ShoppingBag,
   Ticket,
   Server,
+  Terminal,
   Timer,
   Wallet,
   Workflow,
@@ -341,6 +345,16 @@ const routes: Record<
   },
 };
 
+function panelOrigin(value: string): string | undefined {
+  if (!/^https?:\/\/[^\s/]+\/?$/i.test(value) || /[?#\\]/.test(value)) return;
+  try {
+    const url = new URL(value);
+    if (!url.username && !url.password && url.pathname === "/") return url.origin;
+  } catch {
+    return;
+  }
+}
+
 export default function Management({ page, user, refresh }: Props) {
   const spec = routes[page];
   const narrow = Grid.useBreakpoint().md === false;
@@ -394,19 +408,17 @@ export default function Management({ page, user, refresh }: Props) {
   const checkoutFee = Math.round(checkoutAmount * paymentRate / 10000);
   const [enroll, setEnroll] = useState<{
     token: string;
-    panel: string;
     groupName: string;
-    installMirror?: string;
     relay: boolean;
- reverseIngress?:boolean;
- reverseEgress?:boolean;
+    reverseIngress?: boolean;
+    reverseEgress?: boolean;
   }>();
   const [relayAddress, setRelayAddress] = useState("");
   const [reverseAddress,setReverseAddress]=useState("");
   const [reverseOnly,setReverseOnly]=useState(false);
   const [relayTransport, setRelayTransport] = useState("tls");
   const [offlineInstall, setOfflineInstall] = useState(false);
-  const [overseasInstall, setOverseasInstall] = useState(false);
+  const [customPanel, setCustomPanel] = useState("");
   const [bindAddresses, setBindAddresses] = useState("");
   const [nodeInstance, setNodeInstance] = useState("");
   const [planPage, setPlanPage] = useState(1);
@@ -738,9 +750,9 @@ export default function Management({ page, user, refresh }: Props) {
       setUDPSmartBind(false);
       setEnrollAdvanced(false);
       setOfflineInstall(false);
-      setOverseasInstall(false);
- setReverseAddress("");
- setReverseOnly(false);
+      setCustomPanel("");
+      setReverseAddress("");
+      setReverseOnly(false);
       setRelayTransport(group.relayMode || "tls");
       setEnroll(await api(groupAPI + "/" + group.id + "/enrollment", "POST"));
     } catch (e) {
@@ -1588,7 +1600,9 @@ export default function Management({ page, user, refresh }: Props) {
   const quote = (v: string) => "'" + v.replaceAll("'", "'\\''") + "'";
   const instance = nodeInstance.trim();
   const validInstance = instance === "" || /^[a-z][a-z0-9-]{0,19}$/.test(instance);
-  const canCopy = !!enroll && validInstance;
+  const customPanelURL = customPanel.trim();
+  const panelAddress = panelOrigin(customPanelURL || window.location.origin);
+  const canCopy = !!enroll && validInstance && !!panelAddress;
   const instanceOption = instance ? " --instance " + quote(instance) : "";
   const relayOptions = reverseOnly ? " --reverse-only" : enroll?.relay
     ? `${relayAddress ? " --relay-address " + quote(relayAddress) : " --prompt-relay-address"} --relay-transport ${quote(relayTransport)}`
@@ -1597,13 +1611,13 @@ export default function Management({ page, user, refresh }: Props) {
   const bindOption = bindAddresses.trim() ? " --bind " + quote(bindAddresses.trim()) : "";
   const udpOption = udpSmartBind ? " --udp-smart-bind" : "";
   const groupOption = enroll?.groupName ? " --group-name " + quote(enroll.groupName) : "";
-  const commandArgs = canCopy && enroll ? `${quote(enroll.panel)} ${quote(enroll.token)}${instanceOption}${groupOption}${relayOptions}${reverseOption}${bindOption}${udpOption}` : "";
-  const installOrigin = overseasInstall && enroll?.installMirror ? enroll.installMirror : enroll?.panel;
-  const installEnvironment = overseasInstall && enroll?.installMirror ? `env HOPX_INSTALL_MIRROR=${quote(enroll.installMirror)} ` : "";
-  const command = commandArgs && enroll
+  const commandArgs = canCopy && enroll && panelAddress
+    ? `${quote(panelAddress)} ${quote(enroll.token)}${instanceOption}${groupOption}${relayOptions}${reverseOption}${bindOption}${udpOption}`
+    : "";
+  const command = commandArgs && panelAddress
     ? offlineInstall
       ? `sudo env HOPX_OFFLINE_DIR="$PWD" bash ./node-install.sh ${commandArgs}`
-      : `curl -fsSLo hopx-node-install.sh ${quote(installOrigin + "/releases/node-install.sh")} && sudo ${installEnvironment}bash hopx-node-install.sh ${commandArgs}`
+      : `curl -fsSLo hopx-node-install.sh ${quote(panelAddress + "/releases/node-install.sh")} && sudo bash hopx-node-install.sh ${commandArgs}`
     : "";
 
   const routingMode = Form.useWatch(["routing", "addressMode"], form);
@@ -1801,78 +1815,107 @@ export default function Management({ page, user, refresh }: Props) {
       </Modal>
       <Modal
         open={!!enroll}
-        title="接入节点"
-        onCancel={() => setEnroll(undefined)}
-        footer={
-          <Button
-            type="primary"
-            disabled={!canCopy}
-            onClick={() =>
-              void navigator.clipboard
-                .writeText(command)
-                .then(() => message.success("已复制"), () => message.error("请选中安装命令手动复制"))
-            }
-          >
-            复制安装命令
-          </Button>
-        }
-      >
-        <div className="enroll-settings">
-          <Radio.Group aria-label="部署方式" optionType="button" buttonStyle="solid"
-            value={offlineInstall ? "offline" : "online"} onChange={event => setOfflineInstall(event.target.value === "offline")}
-            options={[{ value: "online", label: "在线部署" }, { value: "offline", label: "离线部署" }]} />
-          {!offlineInstall && enroll?.installMirror && <div className="node-downloads">
-            <Radio.Group aria-label="安装线路" optionType="button" size="small"
-              value={overseasInstall ? "overseas" : "default"} onChange={event => setOverseasInstall(event.target.value === "overseas")}
-              options={[{ value: "default", label: "面板线路" }, { value: "overseas", label: "海外线路" }]} />
-          </div>}
-          {offlineInstall && <div className="node-downloads">
-            <Space wrap><a href="/api/node-package/amd64">下载 Linux x86_64</a><a href="/api/node-package/arm64">下载 Linux ARM64</a></Space>
-            <p className="muted">解压后进入发行包目录执行安装命令。注册时节点需能连接面板。</p>
-          </div>}
-        </div>
-        {enroll?.relay && !reverseOnly && <div className="enroll-connection editor-section">
-          <label htmlFor="enroll-address">节点连接地址</label>
-          <label id="enroll-transport-label">传输协议</label>
-          <Input id="enroll-address" value={relayAddress} onChange={event => setRelayAddress(event.target.value.trim())}
-            placeholder="留空，在节点安装时填写" />
-          <Select aria-labelledby="enroll-transport-label" value={relayTransport} options={relayModes}
-            onChange={setRelayTransport} />
-          <p className="muted">{relayModeHelp(relayTransport)}</p>
+        title={<div className="enroll-title">
+          <span className="enroll-title-icon"><Server size={19} aria-hidden="true" /></span>
+          <div><strong>接入节点</strong><span>{enroll?.groupName}</span></div>
         </div>}
-        {enroll && <>
-          <Button className="editor-disclosure" type="text" aria-expanded={enrollAdvanced} aria-controls="enroll-advanced"
-            icon={<ChevronDown size={15} className={enrollAdvanced ? "rotate" : undefined} />}
-            onClick={() => setEnrollAdvanced(!enrollAdvanced)}>接入选项</Button>
-          <div id="enroll-advanced" className="editor-section" hidden={!enrollAdvanced}>
-            <div className="enroll-command">
-              <label htmlFor="enroll-instance">节点实例</label>
-              <Input id="enroll-instance" value={nodeInstance} placeholder="留空使用默认实例"
-                status={validInstance ? undefined : "error"} onChange={event => setNodeInstance(event.target.value)} />
-              <p className="muted">{validInstance ? "同一台机器接入多个节点时，每个节点填写不同的实例名。" :
-                "以小写字母开头，最多 20 位，可用小写字母、数字和连字符。"}</p>
-            </div>
-            {enroll.reverseIngress && <>
-              <Input className="alert-gap" aria-label="监听绑定地址" value={bindAddresses}
-                onChange={event => setBindAddresses(event.target.value)} placeholder="监听绑定地址（多个 IP 用逗号分隔）" />
-              <Input className="alert-gap" aria-label="反向入口地址" value={reverseAddress}
-                onChange={event => setReverseAddress(event.target.value.trim())} placeholder="反向入口，例如 entry.example.com:38473" />
-              <Space className="alert-gap">
-                <Switch checked={udpSmartBind} onChange={setUDPSmartBind} aria-label="UDP 智能绑定" />
-                <span>UDP 智能绑定</span>
-              </Space>
-            </>}
-            {enroll.reverseEgress && <Space className="alert-gap">
-              <Switch checked={reverseOnly} onChange={setReverseOnly} aria-label="反向出口" />
-              <span>反向出口</span>
-            </Space>}
+        className="enroll-modal"
+        width={620}
+        onCancel={() => setEnroll(undefined)}
+        footer={<Button
+          type="primary"
+          icon={<Copy size={15} aria-hidden="true" />}
+          disabled={!command}
+          onClick={async () => {
+            try {
+              await navigator.clipboard.writeText(command);
+              message.success("安装命令已复制");
+            } catch {
+              message.error("请选择命令文本手动复制");
+            }
+          }}
+        >复制安装命令</Button>}
+      >
+        <div className="enroll-content">
+          <Segmented aria-label="部署方式" block
+            value={offlineInstall ? "offline" : "online"}
+            onChange={value => setOfflineInstall(value === "offline")}
+            options={[
+              { value: "online", label: "在线部署", icon: <Globe size={15} aria-hidden="true" /> },
+              { value: "offline", label: "离线部署", icon: <Download size={15} aria-hidden="true" /> },
+            ]} />
+          {offlineInstall && <div className="enroll-downloads">
+            <Space wrap>
+              <Button href="/api/node-package/amd64" icon={<Download size={14} aria-hidden="true" />}>Linux x86_64</Button>
+              <Button href="/api/node-package/arm64" icon={<Download size={14} aria-hidden="true" />}>Linux ARM64</Button>
+            </Space>
+            <p>解压后在发行包目录执行命令。注册时节点需要能访问面板。</p>
+          </div>}
+          <div className="enroll-panel-address">
+            <Globe size={16} aria-hidden="true" />
+            <div><span>面板地址</span><code>{panelAddress || "地址无效"}</code></div>
+            <Button size="small" type="text" onClick={() => {
+              setEnrollAdvanced(true);
+              requestAnimationFrame(() => document.getElementById("enroll-panel-address")?.focus());
+            }}>自定义</Button>
           </div>
-        </>}
-        <div className="enroll-command editor-section">
-          <label htmlFor="enroll-command">安装命令</label>
-          <Input.TextArea id="enroll-command" className="mono" rows={4} readOnly value={command}
-            onFocus={event => event.target.select()} />
-          <p className="muted">同一设备组可用同一条命令接入多台机器。{enroll?.relay && !reverseOnly && relayAddress && "接入不同机器时，可留空连接地址，由安装脚本询问。"}</p>
+          {enroll?.relay && !reverseOnly && <div className="enroll-connection">
+            <label htmlFor="enroll-address">节点连接地址</label>
+            <label id="enroll-transport-label">传输协议</label>
+            <Input id="enroll-address" value={relayAddress} onChange={event => setRelayAddress(event.target.value.trim())}
+              placeholder="留空，在节点安装时填写" />
+            <Select aria-labelledby="enroll-transport-label" value={relayTransport} options={relayModes}
+              onChange={setRelayTransport} />
+            <p>{relayModeHelp(relayTransport)}</p>
+          </div>}
+          {enroll && <details className="enroll-options" open={enrollAdvanced}
+            onToggle={event => setEnrollAdvanced(event.currentTarget.open)}>
+            <summary><Settings2 size={15} aria-hidden="true" />接入选项<ChevronDown size={15} aria-hidden="true" /></summary>
+            <div className="enroll-options-fields">
+              <div className="enroll-field">
+                <label htmlFor="enroll-panel-address">自定义面板地址</label>
+                <Input id="enroll-panel-address" type="url" value={customPanel} placeholder={window.location.origin}
+                  status={panelAddress ? undefined : "error"} onChange={event => setCustomPanel(event.target.value)} />
+                {panelAddress
+                  ? <p>留空使用当前面板地址。节点需要能访问此地址。</p>
+                  : <p className="enroll-error" role="alert">请输入完整的 HTTP 或 HTTPS 站点地址。</p>}
+              </div>
+              <div className="enroll-field">
+                <label htmlFor="enroll-instance">节点实例</label>
+                <Input id="enroll-instance" value={nodeInstance} placeholder="留空使用默认实例"
+                  status={validInstance ? undefined : "error"} onChange={event => setNodeInstance(event.target.value)} />
+                <p className={validInstance ? undefined : "enroll-error"}>{validInstance ? "同一台机器接入多个节点时，给各实例填写不同名称。" :
+                  "以小写字母开头，最多 20 位，可用小写字母、数字和连字符。"}</p>
+              </div>
+              {enroll.reverseIngress && <>
+                <div className="enroll-field">
+                  <label htmlFor="enroll-bind">监听绑定地址</label>
+                  <Input id="enroll-bind" value={bindAddresses} onChange={event => setBindAddresses(event.target.value)}
+                    placeholder="多个 IP 用逗号分隔" />
+                </div>
+                <div className="enroll-field">
+                  <label htmlFor="enroll-reverse">反向入口地址</label>
+                  <Input id="enroll-reverse" value={reverseAddress} onChange={event => setReverseAddress(event.target.value.trim())}
+                    placeholder="entry.example.com:38473" />
+                </div>
+              </>}
+              {(enroll.reverseIngress || enroll.reverseEgress) && <Space wrap size={16}>
+                {enroll.reverseIngress && <Space>
+                  <Switch size="small" checked={udpSmartBind} onChange={setUDPSmartBind} aria-label="UDP 智能绑定" />
+                  <span>UDP 智能绑定</span>
+                </Space>}
+                {enroll.reverseEgress && <Space>
+                  <Switch size="small" checked={reverseOnly} onChange={setReverseOnly} aria-label="反向出口" />
+                  <span>反向出口</span>
+                </Space>}
+              </Space>}
+            </div>
+          </details>}
+          <div className="enroll-command">
+            <label htmlFor="enroll-command"><Terminal size={16} aria-hidden="true" />安装命令</label>
+            <Input.TextArea id="enroll-command" readOnly value={command} spellCheck={false} rows={4}
+              placeholder="修正接入选项后生成命令" onFocus={event => event.target.select()} />
+          </div>
         </div>
       </Modal>
       {jsonGroup && <JsonEditor title={"设备组 JSON · " + jsonGroup.name} value={jsonGroup}

@@ -57,6 +57,11 @@ func (s *Server) enrollment(w http.ResponseWriter, r *http.Request, u User) {
 		return
 	}
 	base := s.publicURL
+	if r.Header.Get("Sec-Fetch-Site") == "same-origin" {
+		if origin := browserOrigin(r.Header.Get("Origin")); origin != nil {
+			base = origin.String()
+		}
+	}
 	if base == "" {
 		scheme := "http"
 		if r.TLS != nil {

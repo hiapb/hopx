@@ -131,6 +131,11 @@ func TestNodeEnrollmentAndIdempotentAccounting(t *testing.T) {
 	if invite["token"] != reopened["token"] {
 		t.Fatal("opening the enrollment dialog changed the group credential")
 	}
+	proxied := map[string]string{"Origin": "https://panel.example.com", "Sec-Fetch-Site": "same-origin"}
+	testRequest(t, client, "POST", enrollmentURL, proxied, nil, 201, &reopened)
+	if reopened["panel"] != proxied["Origin"] || reopened["token"] != invite["token"] {
+		t.Fatal("enrollment did not use the browser-facing origin through the reverse proxy")
+	}
 	operation := fmt.Sprintf("%s/groups/%d/operations", url, group.ID)
 	testRequest(t, client, "POST", operation, nil, map[string]string{"action": "revoke-enrollments"}, 204, nil)
 	testRequest(t, client, "POST", url+"/node/register", enrollment, registration, 401, nil)

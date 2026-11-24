@@ -856,6 +856,9 @@ func (s *Server) settings(w http.ResponseWriter, r *http.Request, u User) {
 	keys["ruleProbeInterval"] = "300"
 	keys["nodeInstallMirror"] = ""
 	keys["homeLinks"] = "[]"
+	keys["registrationVerification"] = verificationOff
+	keys["registrationTurnstileSiteKey"] = ""
+	keys["registrationTurnstileSecret"] = ""
 	for _, key := range []string{"showShop", "showOrders", "showNodeStatus", "invitesEnabled"} {
 		keys[key] = "true"
 	}
@@ -869,8 +872,17 @@ func (s *Server) settings(w http.ResponseWriter, r *http.Request, u User) {
 	}
 	if r.Method == "GET" {
 		for k, d := range keys {
-			keys[k] = s.setting(k, d)
+			if k != "registrationTurnstileSecret" {
+				keys[k] = s.setting(k, d)
+			}
 		}
+		registration, err := readRegistrationVerification(s.db)
+		if err != nil {
+			dbFailure(w, err)
+			return
+		}
+		keys["registrationVerification"] = registration.kind
+		keys["registrationTurnstileSecretConfigured"] = strconv.FormatBool(registration.secret != "")
 		respond(w, 200, keys)
 		return
 	}
@@ -885,6 +897,19 @@ func (s *Server) settings(w http.ResponseWriter, r *http.Request, u User) {
 	}
 	defer tx.Rollback()
 	for k, v := range in {
+		switch k {
+		case "registrationVerification":
+			if v != verificationOff && v != verificationArithmetic && v != verificationTurnstile {
+				fail(w, 400, "请选择有效的验证码类型")
+				return
+			}
+		case "registrationTurnstileSiteKey", "registrationTurnstileSecret":
+			v = strings.TrimSpace(v)
+			if v != "" && !validTurnstileKey(v) {
+				fail(w, 400, "Turnstile 密钥格式无效")
+				return
+			}
+		}
 		if k == "ruleProbeInterval" && v != "60" && v != "300" {
 			fail(w, 400, "采样间隔请选择 1 分钟或 5 分钟")
 			return
@@ -960,6 +985,15 @@ func (s *Server) settings(w http.ResponseWriter, r *http.Request, u User) {
 			dbFailure(w, e)
 			return
 		}
+	}
+	registration, err := readRegistrationVerification(tx)
+	if err != nil {
+		dbFailure(w, err)
+		return
+	}
+	if registration.kind == verificationTurnstile && (!validTurnstileKey(registration.siteKey) || !validTurnstileKey(registration.secret)) {
+		fail(w, 400, "请填写 Turnstile 站点密钥和服务端密钥")
+		return
 	}
 	if e = tx.Commit(); e != nil {
 		dbFailure(w, e)

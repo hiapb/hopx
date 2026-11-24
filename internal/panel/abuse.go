@@ -65,7 +65,12 @@ type captchaStore struct {
 }
 
 func (s *Server) makeChallenge(w http.ResponseWriter, r *http.Request) {
-	if s.setting("registrationChallenge", "false") != "true" {
+	config, err := readRegistrationVerification(s.db)
+	if err != nil {
+		dbFailure(w, err)
+		return
+	}
+	if config.mode == "closed" || config.kind != verificationArithmetic {
 		fail(w, 404, "注册验证未开启")
 		return
 	}

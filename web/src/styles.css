@@ -618,11 +618,116 @@ button:focus-visible, a:focus-visible { outline: 2px solid var(--accent); outlin
 .route-preview-row > span { display: inline-flex; flex-wrap: wrap; align-items: center; gap: 5px; min-width: 0; overflow-wrap: anywhere; }
 .route-preview-row small { background: var(--rail); border: 1px solid var(--line); border-radius: 4px; padding-inline: 4px; font-size: inherit; }
 .route-preview svg { color: var(--accent); flex: none; }
-.enroll-settings { margin-bottom: 14px; }
-.enroll-connection { display: grid; grid-template-columns: minmax(0, 1fr) minmax(116px, 34%); gap: 6px 10px; }
-.enroll-connection > label, .enroll-command > label { font-weight: 550; }
-.enroll-connection > p, .enroll-command > p { grid-column: 1 / -1; font-size: 12px; }
-.enroll-command { display: grid; gap: 6px; margin-top: 14px; }
+.enroll-modal .ant-modal-content { border-radius: 20px; }
+.enroll-title { display: flex; align-items: center; gap: 12px; }
+.enroll-title-icon {
+  flex: none;
+  display: grid;
+  place-items: center;
+  width: 39px;
+  height: 39px;
+  border-radius: 12px;
+  background: var(--active);
+  color: var(--accent);
+}
+.enroll-title > div { min-width: 0; display: grid; gap: 1px; }
+.enroll-title strong { font-size: 17px; }
+.enroll-title > div > span { color: var(--muted); font-size: 12px; font-weight: 450; }
+.enroll-content { display: grid; gap: 14px; }
+.enroll-content > .ant-segmented {
+  padding: 4px;
+  border: 1px solid var(--line);
+  border-radius: 12px;
+  background: var(--subtle);
+}
+.enroll-content .ant-segmented-item { border-radius: 8px; }
+.enroll-content .ant-segmented-item-label {
+  min-height: 32px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 7px;
+  font-weight: 550;
+}
+.enroll-content .ant-segmented-item-icon { display: inline-flex; margin: 0; }
+.enroll-panel-address {
+  min-width: 0;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 10px 11px;
+  background: var(--subtle);
+  border: 1px solid var(--line);
+  border-radius: 12px;
+}
+.enroll-panel-address > svg { flex: none; color: var(--accent); }
+.enroll-panel-address > div { display: grid; flex: 1; min-width: 0; gap: 3px; }
+.enroll-panel-address span, .enroll-options-fields p, .enroll-downloads p, .enroll-connection p { font-size: 12px; color: var(--muted); }
+.enroll-panel-address code { overflow-wrap: anywhere; font: 12px/1.5 "IBM Plex Mono", ui-monospace, monospace; }
+.enroll-panel-address .ant-btn { flex: none; color: var(--accent); }
+.enroll-downloads { display: grid; gap: 7px; }
+.enroll-connection {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(111px, 33%);
+  gap: 6px 10px;
+}
+.enroll-connection > p { grid-column: 1 / -1; }
+.enroll-field, .enroll-options-fields { display: grid; gap: 6px; }
+.enroll-field > label, .enroll-connection > label { font-weight: 550; }
+.enroll-options {
+  border: 1px solid var(--line);
+  border-radius: 12px;
+}
+.enroll-options summary {
+  cursor: pointer;
+  list-style: none;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-height: 38px;
+  padding: 8px 11px;
+  font-weight: 550;
+}
+.enroll-options summary::-webkit-details-marker { display: none; }
+.enroll-options summary > svg { color: var(--muted); flex: none; }
+.enroll-options summary > svg:last-child { margin-inline-start: auto; transition: transform .16s ease; }
+.enroll-options[open] summary > svg:last-child { transform: rotate(180deg); }
+.enroll-options-fields { gap: 12px; padding: 12px; border-top: 1px solid var(--line); }
+.enroll-options-fields .enroll-error { color: var(--error); }
+.enroll-command {
+  overflow: hidden;
+  border-radius: 12px;
+  border: 1px solid #314a42;
+  background: #22352e;
+  color: #deede4;
+}
+.enroll-command > label {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 9px 11px;
+  background: #293f36;
+  border-bottom: 1px solid #395448;
+  font-size: 12px;
+  font-weight: 600;
+}
+.enroll-command textarea.ant-input {
+  display: block;
+  padding: 10px 11px;
+  border: 0;
+  border-radius: 0;
+  resize: none;
+  background: transparent;
+  color: inherit;
+  font: 12px/1.6 "IBM Plex Mono", ui-monospace, monospace;
+  overflow-wrap: anywhere;
+}
+.enroll-command textarea.ant-input:focus { box-shadow: inset 0 0 0 1px #91baa3; }
+.enroll-command textarea.ant-input::placeholder { color: #a4bbad; }
+@media (max-width: 420px) {
+  .enroll-content { gap: 11px; }
+  .enroll-connection > p { line-height: 1.45; }
+}
 .details-grid dl { margin: 0; }
 .details-grid dt { color: var(--muted); font-size: 12px; margin-bottom: 4px; }
 .details-grid dd { margin: 0; overflow-wrap: anywhere; }
@@ -724,15 +829,176 @@ button:focus-visible, a:focus-visible { outline: 2px solid var(--accent); outlin
 .balance-label strong { margin-left: 6px; color: var(--text); }
 .empty-state { display: flex; align-items: center; min-height: 76px; gap: 8px; padding: 14px; border-block: 1px solid var(--line); color: var(--muted); font-size: 13px; }
 .empty-state svg { width: 16px; height: 16px; }
-.login-shell { min-height: 100dvh; display: grid; align-items: center; padding: 24px; background: var(--canvas); }
-.login { width: min(100%, 376px); margin: auto; }
-:root:not([data-theme="dark"]) .login-shell { background: var(--workspace); }
-:root:not([data-theme="dark"]) .login { width: min(100%, 420px); padding: clamp(18px, 5vw, 30px); border: 1px solid var(--line); border-radius: 16px; background: var(--canvas); }
-.login .brand { margin-bottom: 23px; }
-.login h1 { font-size: 26px; font-weight: 700; margin-bottom: 18px; }
-.login p { color: var(--muted); margin: -9px 0 16px; }
-.login .ant-alert { margin-bottom: 14px; }
-.login .ant-btn-link { padding-inline: 0; margin-top: 9px; }
+.login-shell {
+  --login-grid: rgba(77, 116, 97, .055);
+  --login-halo: rgba(139, 180, 152, .29);
+  --login-base: #eef3e9;
+  --login-card: #f9fbf6;
+  --login-input: #fcfdf9;
+  --login-shadow: rgba(38, 69, 53, .13);
+  --login-highlight: rgba(255, 255, 255, .74);
+  --login-action: linear-gradient(135deg, #527f69, #376a54);
+  --login-action-hover: linear-gradient(135deg, #46745c, #2e604a);
+  min-height: 100dvh;
+  display: grid;
+  align-items: center;
+  padding: clamp(24px, 5vw, 80px);
+  background:
+    radial-gradient(ellipse at 2% 6%, var(--login-halo), transparent 31%),
+    radial-gradient(ellipse at 97% 97%, var(--login-halo), transparent 27%),
+    linear-gradient(var(--login-grid) 1px, transparent 1px) 0 0 / 56px 56px,
+    linear-gradient(90deg, var(--login-grid) 1px, transparent 1px) 0 0 / 56px 56px,
+    var(--login-base);
+}
+:root[data-theme="dark"] .login-shell {
+  --login-grid: rgba(155, 184, 219, .05);
+  --login-halo: rgba(62, 101, 160, .26);
+  --login-base: #141a22;
+  --login-card: #1b222b;
+  --login-input: #171e27;
+  --login-shadow: rgba(0, 0, 0, .36);
+  --login-highlight: rgba(154, 184, 228, .08);
+  --login-action: linear-gradient(135deg, #a8c8ff, #82aaf0);
+  --login-action-hover: linear-gradient(135deg, #bad4ff, #96bafa);
+}
+.login-layout {
+  width: min(100%, 1060px);
+  margin-inline: auto;
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(380px, 470px);
+  align-items: center;
+  gap: clamp(48px, 8vw, 134px);
+}
+.login-intro { min-width: 0; }
+.login-brand {
+  display: flex;
+  align-items: center;
+  gap: 13px;
+  font-size: 23px;
+  letter-spacing: -.035em;
+  overflow-wrap: anywhere;
+}
+.login-brand-mark {
+  display: grid;
+  flex: none;
+  place-items: center;
+  width: 50px;
+  aspect-ratio: 1;
+  color: var(--mark-text);
+  background: var(--mark);
+  border-radius: 15px;
+  box-shadow: inset 0 1px 0 var(--login-highlight);
+}
+.login-intro-copy { margin-block: 38px 28px; }
+.login-intro-copy h2 { font-size: clamp(34px, 4vw, 54px); font-weight: 750; line-height: 1.13; letter-spacing: -.065em; }
+.login-intro-copy p { margin-top: 15px; color: var(--muted); font-size: 15px; line-height: 1.65; }
+.login-route {
+  border: 1px solid var(--line);
+  border-radius: 18px;
+  background: color-mix(in srgb, var(--login-card) 65%, transparent);
+  box-shadow: 0 14px 32px -14px var(--login-shadow), inset 0 1px 0 var(--login-highlight);
+}
+.login-route-header {
+  padding: 12px 16px;
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 12px;
+  border-bottom: 1px solid var(--line);
+  color: var(--muted);
+  font: 12px "IBM Plex Mono", ui-monospace, monospace;
+}
+.login-route-dots { display: flex; gap: 5px; }
+.login-route-dots i { width: 7px; aspect-ratio: 1; border-radius: 50%; background: #8eae9a; }
+.login-route-dots i:first-child { background: #d19d8c; }
+.login-route-dots i:nth-child(2) { background: #d4bd81; }
+.login-route-track {
+  display: grid;
+  grid-template-columns: auto 1fr auto 1fr auto;
+  align-items: center;
+  gap: clamp(6px, 1.15vw, 16px);
+  padding: 23px 16px;
+}
+.login-route-track span { display: grid; justify-items: center; gap: 8px; min-width: 52px; font-size: 12px; color: var(--muted); }
+.login-route-track svg { color: var(--accent); }
+.login-route-track b { align-self: start; margin-top: 9px; height: 1px; background: color-mix(in srgb, var(--accent) 42%, transparent); }
+.login {
+  min-width: 0;
+  width: 100%;
+  padding: clamp(28px, 4vw, 46px);
+  border: 1px solid var(--line);
+  border-radius: 24px;
+  background: var(--login-card);
+  box-shadow: 0 26px 60px -18px var(--login-shadow), inset 0 1px 0 var(--login-highlight);
+  animation: login-enter .28s ease-out both;
+}
+@keyframes login-enter {
+  from { opacity: 0; transform: translateY(8px); }
+  to { opacity: 1; transform: translateY(0); }
+}
+.login-heading { margin-bottom: 26px; }
+.login-heading-icon {
+  display: grid;
+  place-items: center;
+  width: 47px;
+  aspect-ratio: 1;
+  margin-bottom: 17px;
+  background: var(--active);
+  color: var(--accent);
+  border: 1px solid color-mix(in srgb, var(--accent) 26%, transparent);
+  border-radius: 14px;
+}
+.login h1 { font-size: clamp(24px, 2.4vw, 33px); font-weight: 720; letter-spacing: -.045em; overflow-wrap: anywhere; line-height: 1.24; }
+.login-heading p { color: var(--muted); margin-top: 9px; line-height: 1.55; }
+.login .ant-form-item { margin-bottom: 19px; }
+.login .ant-form-item .ant-form-item-label { padding-bottom: 7px; }
+.login .ant-form-item-label > label { color: var(--muted); font-weight: 550; }
+.login .ant-input-lg, .login .ant-input-affix-wrapper-lg, .login .ant-input-number-lg {
+  min-height: 45px;
+  border-radius: 10px;
+  background: var(--login-input);
+}
+.login .ant-input-affix-wrapper > .ant-input { min-height: 0; background: transparent; }
+.login .ant-input-number { width: 100%; }
+.login .ant-alert { margin-bottom: 16px; }
+.login .login-submit {
+  min-height: 46px;
+  margin-top: 3px;
+  border-radius: 11px;
+  font-weight: 650;
+}
+.login .login-submit:not(:disabled) {
+  background: var(--login-action);
+  border-color: transparent;
+  box-shadow: 0 8px 20px -7px var(--login-shadow), inset 0 1px 0 var(--login-highlight);
+}
+.login .login-submit:not(:disabled):hover { background: var(--login-action-hover); }
+.login-mode {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 7px;
+  margin-top: 16px;
+  color: var(--muted);
+}
+.login-mode .ant-btn-link, .login-verification-retry .ant-btn-link { padding-inline: 0; }
+.login-arithmetic { position: relative; }
+.login-arithmetic > .ant-btn-link { position: absolute; inset-block-start: 0; inset-inline-end: 0; padding-inline: 0; }
+.login-turnstile { margin-bottom: 15px; color: var(--muted); }
+.login-verification-retry { display: flex; flex-wrap: wrap; gap: 0 9px; align-items: center; }
+@media (max-width: 760px) {
+  .login-shell { padding: 28px 16px; }
+  .login-layout { grid-template-columns: minmax(0, 1fr); width: min(100%, 455px); gap: 18px; }
+  .login-intro-copy, .login-route { display: none; }
+  .login-brand { justify-content: center; font-size: 20px; }
+  .login-brand-mark { width: 39px; border-radius: 12px; }
+  .login-brand-mark svg { width: 19px; }
+  .login { padding: 26px 23px; border-radius: 20px; }
+  .login-heading { margin-bottom: 21px; }
+}
+@media (prefers-reduced-motion: reduce) {
+  .login { animation: none; }
+}
 .loading-screen { display: grid; place-items: center; min-height: 38vh; }
 
 @media (max-width: 767px) {
@@ -860,8 +1126,6 @@ button:focus-visible, a:focus-visible { outline: 2px solid var(--accent); outlin
 @media (max-width: 420px) {
   .profile-fields { grid-template-columns: minmax(0, 1fr); }
 }
-.node-downloads { margin-top: 8px; }
-.node-downloads p { margin-top: 4px; font-size: 13px; }
 .admin-row-note { display: block; font-size: 12px; font-weight: 400; max-width: 190px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 @media (max-width: 580px) {
   .settings-fields { grid-template-columns: 1fr; }

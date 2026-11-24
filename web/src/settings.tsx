@@ -16,7 +16,6 @@ type Field = {
 const fields: Field[] = [
   { name: "name", label: "站点名称", required: true },
   { name: "announcement", label: "站点公告", kind: "area" },
-  { name: "nodeInstallMirror", label: "节点海外安装线路（HTTPS 站点根地址，可选）" },
   {
     name: "registration",
     label: "注册模式",
@@ -76,14 +75,17 @@ const fields: Field[] = [
     kind: "secret",
   },
   {
-    name: "registrationChallenge",
-    label: "注册验证码",
+    name: "registrationVerification",
+    label: "验证码类型",
     kind: "select",
     options: [
-      { value: "false", label: "关闭" },
-      { value: "true", label: "开启" },
+      { value: "off", label: "关闭" },
+      { value: "arithmetic", label: "算术验证" },
+      { value: "turnstile", label: "Cloudflare Turnstile" },
     ],
   },
+  { name: "registrationTurnstileSiteKey", label: "Turnstile 站点密钥", required: true },
+  { name: "registrationTurnstileSecret", label: "Turnstile 服务端密钥", kind: "secret" },
   {
     name: "personalTunnels",
     label: "允许用户创建单端隧道",
@@ -147,7 +149,7 @@ for (const [kind, name] of [["epay", "易支付"], ["epusdt", "EPUSDT"], ["token
 }
 
 const sections = [
-  { key: "site", label: "基本与权限", match: /^(name|registration|personalTunnels|hide|show|lookingGlass|diagnoseIP|nodeInstallMirror)/ },
+  { key: "site", label: "基本与权限", match: /^(name|registration|personalTunnels|hide|show|lookingGlass|diagnoseIP)/ },
   { key: "diagnostics", label: "链路诊断", match: /^ruleProbeInterval$/ },
   { key: "announcement", label: "公告与推广", match: /^announcement$/ },
   { key: "payment", label: "支付", match: /^(minRecharge|epay)/ },
@@ -161,13 +163,20 @@ const sections = [
 type SettingsValues = Record<string, string | HomeLink[] | undefined> & { name?: string; homeLinks?: HomeLink[] };
 
 function restoreSettings(values: Record<string, string>): SettingsValues {
-  return { ruleProbeInterval: "300", ...values, homeLinks: JSON.parse(values.homeLinks || "[]") as HomeLink[] };
+  return {
+    ruleProbeInterval: "300",
+    registrationVerification: values.registrationChallenge === "true" ? "arithmetic" : "off",
+    ...values,
+    homeLinks: JSON.parse(values.homeLinks || "[]") as HomeLink[],
+  };
 }
 
 export default function Settings({ refresh, initialSection }: { refresh: () => Promise<void>; initialSection: string | null }) {
   const desktop = Grid.useBreakpoint().lg;
   const data = useData<Record<string, string> | null>("/admin/settings", null);
   const [form] = Form.useForm<SettingsValues>();
+  const captchaType = Form.useWatch("registrationVerification", { form, preserve: true });
+  const hasTurnstileSecret = data.value?.registrationTurnstileSecretConfigured === "true";
   const [saving, setSaving] = useState(false);
   const [dirty, setDirty] = useState(false);
   const [section, setSection] = useState(sections.find(item => item.key === initialSection)?.key ?? "site");
@@ -181,10 +190,17 @@ export default function Settings({ refresh, initialSection }: { refresh: () => P
   }, [data.value, form]);
 
   async function save() {
-    const { homeLinks, ...values } = form.getFieldsValue(true);
+    const { homeLinks, registrationTurnstileSecretConfigured, ...values } = form.getFieldsValue(true);
     if (!values.name?.trim()) {
       setSection("site");
       message.error("请填写站点名称");
+      return;
+    }
+    if (values.registrationVerification === "turnstile" &&
+        (!values.registrationTurnstileSiteKey?.toString().trim() ||
+          (!hasTurnstileSecret && !values.registrationTurnstileSecret?.toString().trim()))) {
+      setSection("site");
+      message.error("请填写 Turnstile 站点密钥和服务端密钥");
       return;
     }
     const next = { ...values, homeLinks: JSON.stringify(homeLinks ?? []) };
@@ -226,17 +242,21 @@ export default function Settings({ refresh, initialSection }: { refresh: () => P
                     </Radio.Group>
                   </Form.Item>
                 </section> : <div className="settings-fields">
-                  {fields.filter((field) => match.test(field.name)).map((field) => (
+                  {fields.filter((field) => match.test(field.name) &&
+                    (!field.name.startsWith("registrationTurnstile") || captchaType === "turnstile")).map((field) => (
                     <Form.Item key={field.name} name={field.name} label={field.label}
                       className={field.kind === "area" ? "field-wide" : undefined}
                       {...(field.kind === "percent" && {
                         getValueProps: (value: string) => ({ value: Number(value || 0) / 100 }),
                         normalize: (value: number | null) => String(Math.round((value || 0) * 100)),
                       })}
-                      rules={field.required ? [{ required: true }] : undefined}>
+                      rules={field.required || (field.name === "registrationTurnstileSecret" && !hasTurnstileSecret)
+                        ? [{ required: true, whitespace: true }] : undefined}>
                       {field.kind === "select" ? <Select options={field.options} />
                         : field.kind === "percent" ? <InputNumber min={0} max={100} precision={2} suffix="%" style={{ width: "100%" }} />
-                        : field.kind === "secret" ? <Input.Password autoComplete="new-password" />
+                        : field.kind === "secret" ? <Input.Password autoComplete="new-password" placeholder={
+                          field.name === "registrationTurnstileSecret" && hasTurnstileSecret ? "已配置，留空保留" : undefined
+                        } />
                         : field.kind === "area" ? <Input.TextArea rows={8} />
                         : <Input />}
                     </Form.Item>

@@ -230,6 +230,8 @@ export type Order = {
 };
 export type HomeLink = { title: string; url: string };
 
+export type RegistrationVerification = "off" | "arithmetic" | "turnstile";
+
 export type Site = {
   lookingGlass?: string;
   showShop?: string;
@@ -243,6 +245,8 @@ export type Site = {
   homeLinks?: HomeLink[];
   registration: string;
   registrationChallenge?: string;
+  registrationVerification?: RegistrationVerification;
+  registrationTurnstileSiteKey?: string;
   personalTunnels?: string;
 };
 
