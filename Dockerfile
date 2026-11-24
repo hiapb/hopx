@@ -23,8 +23,13 @@ ARG HOPX_VERSION=dev
 RUN CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -trimpath -ldflags="-s -w -X main.version=$HOPX_VERSION" -o /out/hopx-node-linux-amd64 ./cmd/hopx-node
 RUN CGO_ENABLED=0 GOOS=linux GOARCH=arm64 go build -trimpath -ldflags="-s -w -X main.version=$HOPX_VERSION" -o /out/hopx-node-linux-arm64 ./cmd/hopx-node
 
+FROM go-source AS release-verifiers
+RUN CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -trimpath -ldflags="-s -w" -o /verify/verify-amd64 ./cmd/hopx-release-verify
+RUN CGO_ENABLED=0 GOOS=linux GOARCH=arm64 go build -trimpath -ldflags="-s -w" -o /verify/verify-arm64 ./cmd/hopx-release-verify
+
 FROM scratch AS node-artifacts
 COPY --from=node-build /out/ /
+COPY --from=release-verifiers /verify/ /
 
 FROM alpine:3.22
 RUN apk add --no-cache ca-certificates openssl

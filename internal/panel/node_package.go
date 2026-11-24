@@ -32,6 +32,10 @@ func (s *Server) nodePackage(w http.ResponseWriter, r *http.Request, u User) {
 		return
 	}
 	files := []string{"node-install.sh", "node-runner.sh", "release.pem", artifact}
+	verifier := filepath.Join(lines[0], "verify-"+arch)
+	if info, err := os.Stat(filepath.Join(s.releaseDir, verifier)); err == nil && info.Mode().IsRegular() {
+		files = append(files, verifier)
+	}
 	opened := make([]*os.File, 0, len(files))
 	defer func() {
 		for _, file := range opened {

@@ -93,7 +93,7 @@ make_release() (
   signing_dir=$(mktemp -d)
   trap 'if [[ -n $container ]]; then docker rm "$container" >/dev/null 2>&1 || true; fi
         if [[ -n $build_dir ]]; then
-          rm -f -- "$build_dir/hopx-node-linux-amd64" "$build_dir/hopx-node-linux-arm64"
+          rm -f -- "$build_dir/hopx-node-linux-amd64" "$build_dir/hopx-node-linux-arm64" "$build_dir/verify-amd64" "$build_dir/verify-arm64"
           rmdir -- "$build_dir"
         fi
         rm -rf -- "$signing_dir"' EXIT
@@ -107,6 +107,7 @@ make_release() (
   for arch in amd64 arm64; do
     if [[ -n $build_dir ]]; then
       install -m 0644 "$build_dir/hopx-node-linux-$arch" "$artifacts/node-$arch"
+      install -m 0644 "$build_dir/verify-$arch" "$artifacts/verify-$arch"
     elif [[ -n $existing && -f $existing/node-$arch ]]; then
       install -m 0644 "$existing/node-$arch" "$artifacts/node-$arch"
     else

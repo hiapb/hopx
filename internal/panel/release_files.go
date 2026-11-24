@@ -19,7 +19,7 @@ func releaseFileAllowed(name string) bool {
 		return false
 	}
 	switch file {
-	case "node-amd64", "node-arm64", "install-amd64.txt", "install-arm64.txt":
+	case "node-amd64", "node-arm64", "verify-amd64", "verify-arm64", "install-amd64.txt", "install-arm64.txt":
 		return true
 	default:
 		return false
@@ -31,6 +31,9 @@ func (s *Server) releaseFile(w http.ResponseWriter, r *http.Request) {
 	if !releaseFileAllowed(name) {
 		http.NotFound(w, r)
 		return
+	}
+	if !strings.Contains(name, "/") {
+		w.Header().Set("Cache-Control", "no-store")
 	}
 	root, err := os.OpenRoot(s.releaseDir)
 	if err != nil {

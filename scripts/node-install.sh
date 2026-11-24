@@ -251,8 +251,22 @@ install_node() {
   fi
   printf '%s\nlinux-%s\n%s\n' "$version" "$arch" "$checksum" > "$tmp/message"
   printf '%s' "$signature" | openssl base64 -d -A > "$tmp/signature"
-  openssl pkeyutl -verify -pubin -inkey "$tmp/release.pem" -rawin -in "$tmp/message" -sigfile "$tmp/signature" >/dev/null 2>&1 ||
-    die '节点发行签名校验失败。'
+  if ! openssl pkeyutl -verify -pubin -inkey "$tmp/release.pem" -rawin -in "$tmp/message" -sigfile "$tmp/signature" > "$tmp/verify.log" 2>&1; then
+    notice '正在使用 HopX 校验程序验证发行签名…'
+    verifier="$version/verify-$arch"
+    if [[ -n ${HOPX_OFFLINE_DIR:-} ]]; then
+      cp -- "${HOPX_OFFLINE_DIR%/}/$verifier" "$tmp/verify" 2>/dev/null ||
+        die "离线包缺少校验程序，请重新下载新版离线包。OpenSSL：$(head -n 1 "$tmp/verify.log")"
+    elif [[ $base == https://* ]]; then
+      curl --proto '=https' -fsS "$base/releases/$verifier" -o "$tmp/verify" ||
+        die "面板未提供校验程序，请升级面板后重试。OpenSSL：$(head -n 1 "$tmp/verify.log")"
+    else
+      die "当前 OpenSSL 无法验签。请使用 HTTPS 面板地址或新版离线包。OpenSSL：$(head -n 1 "$tmp/verify.log")"
+    fi
+    chmod 0700 "$tmp/verify"
+    "$tmp/verify" "$tmp/release.pem" "$tmp/release" ||
+      die '节点发行未通过校验，请检查面板签名公钥与发行包。'
+  fi
   fetch_release "${artifact#/releases/}" "$tmp/hopx-node"
   [[ $(sha256sum "$tmp/hopx-node" | cut -d ' ' -f1) == "$checksum" ]] || { echo '节点文件校验失败' >&2; exit 1; }
   fetch_release node-runner.sh "$tmp/node-runner.sh"

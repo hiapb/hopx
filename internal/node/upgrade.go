@@ -2,12 +2,8 @@ package node
 
 import (
 	"context"
-	"crypto/ed25519"
 	"crypto/sha256"
-	"crypto/x509"
-	"encoding/base64"
 	"encoding/hex"
-	"encoding/pem"
 	"errors"
 	"fmt"
 	"io"
@@ -18,30 +14,17 @@ import (
 	"runtime"
 	"strings"
 
+	"hopx/internal/release"
 	"hopx/internal/wire"
 )
-
-func releaseMessage(r wire.Release) []byte {
-	return []byte(r.Version + "\n" + runtime.GOOS + "-" + runtime.GOARCH + "\n" + strings.ToLower(r.SHA256) + "\n")
-}
 
 func stageUpgrade(ctx context.Context, client *http.Client, s Settings, r wire.Release) error {
 	pub, e := os.ReadFile(s.PublicKey)
 	if e != nil {
 		return e
 	}
-	block, _ := pem.Decode(pub)
-	if block == nil {
-		return errors.New("invalid release public key")
-	}
-	parsed, e := x509.ParsePKIXPublicKey(block.Bytes)
-	if e != nil {
+	if e = release.Verify(pub, r.Version, runtime.GOOS+"-"+runtime.GOARCH, r.SHA256, r.Signature); e != nil {
 		return e
-	}
-	key, ok := parsed.(ed25519.PublicKey)
-	sig, e := base64.StdEncoding.DecodeString(r.Signature)
-	if !ok || e != nil || !ed25519.Verify(key, releaseMessage(r), sig) {
-		return errors.New("release signature invalid")
 	}
 	if r.Version == "" || strings.ContainsAny(r.Version, "/\\\r\n") {
 		return errors.New("invalid release version")
