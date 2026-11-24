@@ -178,7 +178,12 @@ func loadIdentity(settings Settings) (localState, error) {
 	return state, nil
 }
 
-func Run(ctx context.Context, settings Settings) error {
+func Run(ctx context.Context, settings Settings) (runErr error) {
+	defer func() {
+		if runErr != nil && settings.Executable != "" {
+			recordUpgradeFailure(settings.Directory, runErr)
+		}
+	}()
 	base, e := url.Parse(settings.Panel)
 	if e != nil || (base.Scheme != "https" && base.Scheme != "http") || base.Host == "" || base.User != nil {
 		return errors.New("invalid panel URL")
@@ -307,13 +312,16 @@ func Run(ctx context.Context, settings Settings) error {
 			slog.Warn("load last applied config", "error", e)
 			_ = atomicFile(filepath.Join(settings.Directory, "apply.error"), []byte(e.Error()), 0600)
 			config = wire.Config{}
+		} else if startup.Revision == config.Revision && config.Revision != "" {
+			_ = os.Remove(filepath.Join(settings.Directory, "apply.error"))
 		}
 	} else if !os.IsNotExist(e) {
-		return e
+		return fmt.Errorf("load cached config %s: %w", filepath.Base(startupCache), e)
 	}
 	upgradeDeadline := time.Now().Add(40 * time.Second)
 	upgradeHealthy := 0
 	upgradeRevision := ""
+	var upgradeErr error
 	managedUpgrade := settings.PublicKey != "" && settings.Executable != ""
 	spool := filepath.Join(settings.Directory, "reports")
 	if e = os.MkdirAll(spool, 0700); e != nil {
@@ -442,6 +450,10 @@ func Run(ctx context.Context, settings Settings) error {
 				return nil
 			}
 			slog.Warn("panel sync", "error", e)
+			if verifyUpgrade {
+				upgradeHealthy = 0
+				upgradeErr = fmt.Errorf("面板同步失败: %w", e)
+			}
 			delay = max(delay, 10*time.Second)
 		} else {
 			if reply.LiveBandwidth && stopBandwidth == nil {
@@ -528,12 +540,12 @@ func Run(ctx context.Context, settings Settings) error {
 				}()
 			}
 			var next *wire.Config
-			snapshotOK := true
+			var snapshotErr error
 			if reply.Delta != nil {
 				merged, err := mergeDelta(config, *reply.Delta)
 				if err != nil {
 					forceSnapshot = true
-					snapshotOK = false
+					snapshotErr = fmt.Errorf("无法合并配置增量: %w", err)
 					slog.Warn("config delta rejected", "error", err)
 				} else {
 					next = &merged
@@ -542,7 +554,7 @@ func Run(ctx context.Context, settings Settings) error {
 			if reply.Config != nil {
 				if e = wire.DecodeRoutes(reply.Config.Rules, reply.Config.RouteSets, reply.Config.HopTable); e != nil {
 					forceSnapshot = true
-					snapshotOK = false
+					snapshotErr = fmt.Errorf("无法解析面板配置: %w", e)
 					slog.Warn("config snapshot rejected", "error", e)
 				} else {
 					reply.Config.RouteSets = nil
@@ -577,7 +589,7 @@ func Run(ctx context.Context, settings Settings) error {
 					return nil
 				})
 				if e != nil {
-					snapshotOK = false
+					snapshotErr = fmt.Errorf("无法应用面板配置: %w", e)
 					slog.Warn("config application", "error", e)
 					_ = atomicFile(filepath.Join(settings.Directory, "apply.error"), []byte(e.Error()), 0600)
 				} else {
@@ -587,7 +599,7 @@ func Run(ctx context.Context, settings Settings) error {
 				}
 			}
 			status := "pending"
-			if !snapshotOK {
+			if snapshotErr != nil {
 				status = "failed"
 			} else if config.Revision != "" {
 				_, appliedListeners, _ := engine.Status()
@@ -599,8 +611,18 @@ func Run(ctx context.Context, settings Settings) error {
 				}
 			}
 			if verifyUpgrade {
-				ready := snapshotOK && !forceSnapshot && config.Revision != "" && heartbeat.Revision == config.Revision &&
-					heartbeat.ApplyError == "" && relayModeErr == "" && nativeErr == ""
+				upgradeErr = snapshotErr
+				if upgradeErr == nil {
+					switch {
+					case relayModeErr != "":
+						upgradeErr = fmt.Errorf("中继监听启动失败: %s", relayModeErr)
+					case nativeErr != "":
+						upgradeErr = fmt.Errorf("UDP 监听启动失败: %s", nativeErr)
+					case heartbeat.ApplyError != "":
+						upgradeErr = fmt.Errorf("配置尚未生效: %s", heartbeat.ApplyError)
+					}
+				}
+				ready := upgradeErr == nil && !forceSnapshot && config.Revision != "" && heartbeat.Revision == config.Revision
 				if !ready || upgradeRevision != config.Revision {
 					upgradeHealthy = 0
 					upgradeRevision = config.Revision
@@ -640,7 +662,10 @@ func Run(ctx context.Context, settings Settings) error {
 			}
 		}
 		if verifyUpgrade && time.Now().After(upgradeDeadline) {
-			return errors.New("candidate did not confirm a configuration with the panel")
+			if upgradeErr != nil {
+				return fmt.Errorf("升级确认超时: %w", upgradeErr)
+			}
+			return errors.New("升级确认超时，未确认已生效的配置版本")
 		}
 		timer := time.NewTimer(delay)
 		var wake <-chan struct{}

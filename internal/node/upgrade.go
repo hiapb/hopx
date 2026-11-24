@@ -99,6 +99,17 @@ func pendingUpgrade(s Settings) (bool, error) {
 	return true, nil
 }
 
+func recordUpgradeFailure(dir string, err error) {
+	if errors.Is(err, ErrRestart) || localMessage(dir, "update.pending") == "" {
+		return
+	}
+	if _, statErr := os.Stat(filepath.Join(dir, "update.attempted")); statErr != nil {
+		return
+	}
+	message := strings.Join(strings.Fields(err.Error()), " ")
+	_ = atomicFile(filepath.Join(dir, "update.check"), []byte(message+"\n"), 0600)
+}
+
 func confirmUpgrade(s Settings) error {
 	if err := os.Remove(filepath.Join(s.Directory, "update.pending")); err != nil {
 		return err

@@ -9,6 +9,7 @@ import (
 	"os"
 	"path/filepath"
 	"strconv"
+	"strings"
 	"testing"
 	"time"
 
@@ -16,6 +17,36 @@ import (
 )
 
 func TestUpgradeConfirmsWithUnreachableForwardTarget(t *testing.T) {
+	t.Run("fresh config", func(t *testing.T) { testUpgradeConfirmation(t, false) })
+	t.Run("cached config with stale apply error", func(t *testing.T) { testUpgradeConfirmation(t, true) })
+}
+
+func TestCandidateRecordsStartupFailure(t *testing.T) {
+	stateDir := t.TempDir()
+	if err := toFile(filepath.Join(stateDir, "identity.json"), localState{Identity: wire.Identity{ID: 1, Token: "test"}}); err != nil {
+		t.Fatal(err)
+	}
+	for name, content := range map[string]string{
+		"update.pending": "candidate\n", "update.attempted": "", "active-routes.json": "{",
+	} {
+		if err := os.WriteFile(filepath.Join(stateDir, name), []byte(content), 0600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	err := Run(t.Context(), Settings{
+		Panel: "http://127.0.0.1:0", Directory: stateDir, Executable: filepath.Join(stateDir, "hopx-node"),
+		Version: "candidate", MaxListeners: 8, MaxConnections: 16, Period: time.Second,
+	})
+	if err == nil || !strings.Contains(err.Error(), "unexpected end of JSON input") {
+		t.Fatalf("want configuration load failure, got %v", err)
+	}
+	if got := localMessage(stateDir, "update.check"); got != err.Error() {
+		t.Fatalf("rollback reason = %q, want %q", got, err)
+	}
+}
+
+func testUpgradeConfirmation(t *testing.T, cached bool) {
+	t.Helper()
 	stateDir := t.TempDir()
 	if err := toFile(filepath.Join(stateDir, "identity.json"), localState{Identity: wire.Identity{ID: 1, Token: "test"}}); err != nil {
 		t.Fatal(err)
@@ -31,7 +62,15 @@ func TestUpgradeConfirmsWithUnreachableForwardTarget(t *testing.T) {
 	config := wire.Config{Revision: "test-config", Rules: []wire.Forward{{
 		Rule: wire.Rule{ID: 1, Enabled: true, Protocol: "tcp", Port: port, Targets: []string{"127.0.0.1:0"}},
 	}}}
-	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	if cached {
+		if err := toFile(filepath.Join(stateDir, "active-routes.json"), config); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(filepath.Join(stateDir, "apply.error"), []byte("previous config failed\n"), 0600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 	confirmed := make(chan wire.Heartbeat, 1)
 	mux := http.NewServeMux()
