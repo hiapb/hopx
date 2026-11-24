@@ -347,7 +347,13 @@ func (s *Server) statusSnapshot(equipmentGroup int64) (nodeStatusSnapshot, error
 		return nodeStatusSnapshot{}, err
 	}
 	out.devices, err = s.deviceGroupSnapshot(false, equipmentGroup)
-	if err == nil && equipmentGroup == 0 {
+	if err != nil {
+		return nodeStatusSnapshot{}, err
+	}
+	for i := range out.devices {
+		out.devices[i].CountryCode = s.nodeCountry(out.devices[i].Registration)
+	}
+	if equipmentGroup == 0 {
 		out.until = time.Now().Add(2 * time.Second)
 		s.nodeStatus = out
 	}

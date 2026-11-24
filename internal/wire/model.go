@@ -337,6 +337,7 @@ type Sync struct {
 }
 
 type Device struct {
+	CountryCode         string `json:"countryCode,omitempty"`
 	AcceptScopedReverse bool   `json:"-"`
 	AcceptExitMeter     bool   `json:"-"`
 	AcceptPortCheck     bool   `json:"-"`

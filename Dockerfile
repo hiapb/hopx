@@ -31,11 +31,17 @@ FROM scratch AS node-artifacts
 COPY --from=node-build /out/ /
 COPY --from=release-verifiers /verify/ /
 
+FROM alpine:3.22 AS geoip
+COPY assets/geoip/country.mmdb.gz /tmp/country.mmdb.gz
+RUN gzip -dc /tmp/country.mmdb.gz > /tmp/country.mmdb
+
 FROM alpine:3.22
 RUN apk add --no-cache ca-certificates openssl
 COPY --from=panel /out/hopx-panel /usr/local/bin/hopx-panel
+COPY --from=geoip /tmp/country.mmdb /usr/local/share/hopx/country.mmdb
+COPY assets/geoip/README.md /usr/local/share/hopx/geoip-attribution.md
 COPY scripts/node-install.sh scripts/node-runner.sh /usr/local/share/hopx/
 USER 65532:65532
-ENV HOPX_DB=/data/hopx.db HOPX_RELEASES=/releases HOPX_LISTEN=:38471
+ENV HOPX_GEOIP_DB=/usr/local/share/hopx/country.mmdb HOPX_DB=/data/hopx.db HOPX_RELEASES=/releases HOPX_LISTEN=:38471
 EXPOSE 38471
 ENTRYPOINT ["/usr/local/bin/hopx-panel"]

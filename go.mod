@@ -9,6 +9,7 @@ require (
 	github.com/go-gost/x v0.28.1
 	github.com/go-sql-driver/mysql v1.9.3
 	github.com/hashicorp/yamux v0.1.1
+	github.com/oschwald/maxminddb-golang/v2 v2.9.1
 	github.com/pion/dtls/v3 v3.1.16
 	github.com/pires/go-proxyproto v0.8.1
 	golang.org/x/crypto v0.59.0

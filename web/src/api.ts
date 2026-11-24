@@ -119,6 +119,7 @@ export type Group = {
   offlineSeconds: number;
 };
 export type Node = {
+  countryCode?: string;
   acceptHAProxy?: boolean;
   relayTransport?: string;
   nativeUDP?: boolean;

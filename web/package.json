@@ -10,6 +10,7 @@
   "dependencies": {
     "antd": "^5.27.6",
     "dayjs": "1.11.23",
+    "flag-icons": "7.6.0",
     "lucide-react": "^0.577.0",
     "react": "^19.2.0",
     "react-dom": "^19.2.0"

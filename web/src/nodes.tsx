@@ -14,6 +14,7 @@ import {
 import { api, bytes, date, useData } from "./api";
 import type { Group, Node, User } from "./api";
 import IconAction from "./icon-action";
+import { NodeFlag, nodeDisplayName, nodeRegion } from "./node-location";
 
 const speed = (mbps: number) =>
   mbps >= 1 ? mbps.toFixed(2) + " Mbps" : (mbps * 1000).toFixed(1) + " Kbps";
@@ -225,7 +226,7 @@ export default function Nodes({ user, lookingGlass }: { user: User; lookingGlass
   const shown = visibleGroups.filter(g => group === undefined || g.id === group).flatMap(group => {
     const all = byGroup.get(group.id) ?? [];
     const matches = all.filter(node => (online === "all" || node.online === (online === "online")) &&
-      [node.name, node.region, node.ipv4, node.ipv6, node.address].some(value => value?.toLowerCase().includes(searchTerm)));
+      [node.name, nodeDisplayName(node), nodeRegion(node), node.countryCode, node.region, node.ipv4, node.ipv6, node.address].some(value => value?.toLowerCase().includes(searchTerm)));
     return matches.length || ((user.admin || group.owner === user.id) && !searchTerm && online === "all")
       ? [{ group, all, matches }]
       : [];
@@ -354,7 +355,10 @@ export default function Nodes({ user, lookingGlass }: { user: User; lookingGlass
                       render: (_, node) => (
                         <div className="probe-node">
                           <div className="probe-node-heading">
-                            <button type="button" className="button-link data-title" onClick={() => showDetails(node.id)}>{node.name}</button>
+                            <button type="button" className="button-link data-title node-name" onClick={() => showDetails(node.id)}>
+                              <NodeFlag node={node} />
+                              <span>{nodeDisplayName(node)}</span>
+                            </button>
                             <span className={node.online ? "probe-status online" : "probe-status"}>
                               <i aria-hidden="true" className={node.online ? "status-dot online" : "status-dot"} />{node.online ? "在线" : "离线"}
                             </span>
@@ -418,7 +422,7 @@ export default function Nodes({ user, lookingGlass }: { user: User; lookingGlass
       <Drawer
         open={!!active}
         onClose={() => setDetail(undefined)}
-        title={active?.name || "节点详情"}
+        title={active ? nodeDisplayName(active) : "节点详情"}
         width="min(480px, 100vw)"
         className="probe-drawer"
       >
@@ -443,7 +447,7 @@ export default function Nodes({ user, lookingGlass }: { user: User; lookingGlass
             <div className="probe-detail-resources"><ResourceUsage node={active} /></div>
             <dl>
               <dt>地区</dt>
-              <dd>{active.region || "—"}</dd>
+              <dd className="node-name"><NodeFlag node={active} />{active.region || nodeRegion(active) || "—"}</dd>
             </dl>
             <dl>
               <dt>最近上报</dt>

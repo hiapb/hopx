@@ -62,6 +62,7 @@ import { relayModes, relayModeHelp, relayModeLabel } from "./relay-protocols";
 import RefreshButton from "./refresh-button";
 import { useConfirmAction } from "./confirm-action";
 import IconAction from "./icon-action";
+import { NodeFlag, nodeDisplayName } from "./node-location";
 import MultiSelect from "./multi-select";
 
 type Row = Record<string, any>;
@@ -1947,7 +1948,9 @@ export default function Management({ page, user, refresh }: Props) {
           pagination={false}
           dataSource={nodes}
           columns={[
-            { title: "节点", dataIndex: "name" },
+            { title: "节点", key: "name", render: (_, node) => <span className="node-name" title={node.name}>
+              <NodeFlag node={node} /><span>{nodeDisplayName(node)}</span>
+            </span> },
             { title: "传输", dataIndex: "relayTransport", render: (value: string, node) => <Space size={4} wrap>
               {value ? relayModeLabel(value) : "—"}
               {node.nativeUDP && <Tag color="success">原生 UDP</Tag>}

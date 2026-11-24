@@ -92,7 +92,7 @@ func main() {
 	if err := os.MkdirAll(filepath.Dir(*database), 0700); err != nil {
 		log.Fatal(err)
 	}
-	s, err := panel.Open(panel.Options{Database: *database, AdminName: env("HOPX_ADMIN", "admin"), AdminPassword: password, PublicURL: os.Getenv("HOPX_PUBLIC_URL"), ReleaseDir: os.Getenv("HOPX_RELEASES"), PaymentSecret: os.Getenv("HOPX_PAYMENT_SECRET"), Version: version, UI: web.Assets()})
+	s, err := panel.Open(panel.Options{Database: *database, CountryDatabase: os.Getenv("HOPX_GEOIP_DB"), AdminName: env("HOPX_ADMIN", "admin"), AdminPassword: password, PublicURL: os.Getenv("HOPX_PUBLIC_URL"), ReleaseDir: os.Getenv("HOPX_RELEASES"), PaymentSecret: os.Getenv("HOPX_PAYMENT_SECRET"), Version: version, UI: web.Assets()})
 	if err != nil {
 		log.Fatal(err)
 	}

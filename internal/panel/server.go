@@ -22,6 +22,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/oschwald/maxminddb-golang/v2"
 	"golang.org/x/crypto/bcrypt"
 	"golang.org/x/sync/singleflight"
 	"hopx/internal/wire"
@@ -39,6 +40,7 @@ type cachedConfig struct {
 }
 
 type Server struct {
+	countryDB          *maxminddb.Reader
 	meterKey           ed25519.PrivateKey
 	warmUntil          time.Time
 	version            string
@@ -70,6 +72,7 @@ type Server struct {
 }
 
 type Options struct {
+	CountryDatabase                                                          string
 	Version                                                                  string
 	Database, AdminName, AdminPassword, PublicURL, ReleaseDir, PaymentSecret string
 	UI                                                                       fs.FS
@@ -186,10 +189,23 @@ func Open(o Options) (*Server, error) {
 			return nil, err
 		}
 	}
+	if o.CountryDatabase != "" {
+		s.countryDB, err = maxminddb.Open(o.CountryDatabase)
+		if err != nil {
+			// The country database is optional for the panel and routing APIs.
+			slog.Warn("node country database unavailable", "error", err)
+		}
+	}
 	return s, nil
 }
 
-func (s *Server) Close() error { return s.db.Close() }
+func (s *Server) Close() error {
+	err := s.db.Close()
+	if s.countryDB != nil {
+		err = errors.Join(err, s.countryDB.Close())
+	}
+	return err
+}
 
 func token() string {
 	return rand.Text()
