@@ -26,26 +26,40 @@ WORKDIR /build
 RUN curl --proto '=https' -fsS "https://www.haproxy.org/download/3.2/src/haproxy-${HAPROXY_VERSION}.tar.gz" -o source.tar.gz \
     && echo "${HAPROXY_SHA256}  source.tar.gz" | sha256sum -c
 
-FROM --platform=linux/amd64 alpine:3.22 AS haproxy-amd64
-RUN apk add --no-cache build-base linux-headers
+# Keep the build tools native. The target HAProxy binaries are only copied
+# into the node releases, so the build host never has to execute them.
+FROM --platform=$BUILDPLATFORM debian:bookworm-slim AS haproxy-build
+ARG BUILDARCH
+RUN case "$BUILDARCH" in \
+      amd64) cross=aarch64-linux-gnu; cross_libc=libc6-dev-arm64-cross ;; \
+      arm64) cross=x86-64-linux-gnu; cross_libc=libc6-dev-amd64-cross ;; \
+      *) echo "Unsupported HAProxy build architecture: $BUILDARCH" >&2; exit 1 ;; \
+    esac \
+    && apt-get update \
+    && apt-get install -y --no-install-recommends gcc libc6-dev binutils make "gcc-$cross" "$cross_libc" \
+    && rm -rf /var/lib/apt/lists/*
 WORKDIR /build
 COPY --from=haproxy-source /build/source.tar.gz ./
-RUN tar -xzf source.tar.gz --strip-components=1 \
-    && make -j4 TARGET=linux-musl LDFLAGS=-static USE_LUA= USE_OPENSSL= USE_PCRE= USE_PCRE2= USE_ZLIB= \
-    && strip haproxy && gzip -n -9 -c haproxy > /haproxy.gz
-
-FROM --platform=linux/arm64 alpine:3.22 AS haproxy-arm64
-RUN apk add --no-cache build-base linux-headers
-WORKDIR /build
-COPY --from=haproxy-source /build/source.tar.gz ./
-RUN tar -xzf source.tar.gz --strip-components=1 \
-    && make -j4 TARGET=linux-musl LDFLAGS=-static USE_LUA= USE_OPENSSL= USE_PCRE= USE_PCRE2= USE_ZLIB= \
-    && strip haproxy && gzip -n -9 -c haproxy > /haproxy.gz
+RUN set -eu; mkdir /out; \
+    for arch in amd64 arm64; do \
+      case "$arch" in \
+        amd64) triple=x86_64-linux-gnu; machine='X86-64' ;; \
+        arm64) triple=aarch64-linux-gnu; machine='AArch64' ;; \
+      esac; \
+      if [ "$arch" = "$BUILDARCH" ]; then prefix=''; else prefix="$triple-"; fi; \
+      mkdir "$arch"; tar -xzf source.tar.gz -C "$arch" --strip-components=1; \
+      make -C "$arch" -j4 TARGET=linux-glibc CC="${prefix}gcc" LDFLAGS=-static \
+        USE_LIBCRYPT= USE_CRYPT_H= USE_LUA= USE_OPENSSL= USE_PCRE= USE_PCRE2= USE_ZLIB=; \
+      "${prefix}strip" "$arch/haproxy"; \
+      LC_ALL=C readelf -h "$arch/haproxy" | grep -q "Machine:.*$machine"; \
+      LC_ALL=C readelf -l "$arch/haproxy" > "$arch/program-headers"; \
+      if grep -q 'INTERP' "$arch/program-headers"; then echo "HAProxy must be statically linked" >&2; exit 1; fi; \
+      gzip -n -9 -c "$arch/haproxy" > "/out/haproxy-$arch.gz"; \
+    done
 
 FROM go-source AS node-build
 ARG HOPX_VERSION=dev
-COPY --from=haproxy-amd64 /haproxy.gz /tmp/haproxy-amd64.gz
-COPY --from=haproxy-arm64 /haproxy.gz /tmp/haproxy-arm64.gz
+COPY --from=haproxy-build /out/ /tmp/
 RUN cp /tmp/haproxy-amd64.gz internal/node/haproxy.gz \
     && CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -tags bundledhaproxy -trimpath -ldflags="-s -w -X main.version=$HOPX_VERSION" -o /out/hopx-node-linux-amd64 ./cmd/hopx-node
 RUN cp /tmp/haproxy-arm64.gz internal/node/haproxy.gz \
