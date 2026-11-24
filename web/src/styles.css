@@ -785,7 +785,11 @@ button:focus-visible, a:focus-visible { outline: 2px solid var(--accent); outlin
 .rule-name { font-weight: 660; }
 .button-link { padding: 0; border: 0; text-align: left; background: none; font: inherit; cursor: pointer; color: inherit; }
 .button-link.rule-name { font-weight: 660; color: var(--accent); }
+.rules-table .rule-name { max-width: 100%; overflow-wrap: anywhere; }
 .button-link:hover { color: var(--accent); text-decoration: underline; }
+.rule-entry-meta { display: flex; flex-wrap: wrap; align-items: center; gap: 4px 8px; }
+.rule-details .rule-entry-meta { margin-block: 4px; }
+.table-address { overflow-wrap: anywhere; }
 .advanced-toggle.ant-btn { padding-inline: 0; }
 .ant-modal-root, .ant-drawer {
   --dialog-gutter: clamp(10px, 2.8vmin, 28px);
@@ -1246,6 +1250,7 @@ textarea.dialog-code.ant-input:hover, textarea.dialog-code.ant-input:focus { bor
 .loading-screen { display: grid; place-items: center; min-height: 38vh; }
 
 @media (max-width: 767px) {
+  :root { scrollbar-gutter: auto; }
   .app-shell { display: block; padding: 0; }
   .sidebar { position: fixed; top: 0; height: 100dvh; left: -221px; width: 208px; transition: left .15s ease; visibility: hidden; }
   .sidebar.mobile-open { left: 0; visibility: visible; }
@@ -1262,7 +1267,31 @@ textarea.dialog-code.ant-input:hover, textarea.dialog-code.ant-input:focus { bor
   .page-head { margin-bottom: 15px; }
   .page-head h1 { font-size: 21px; }
   .account > span:last-child { display: none; }
-  .rules-table .ant-table-tbody tr > td { padding-inline: 9px; }
+  .ant-table-scroll-horizontal .ant-table-thead > tr > th { white-space: nowrap; }
+  .ant-table-scroll-horizontal .ant-table-content {
+    scrollbar-color: color-mix(in srgb, var(--scroll-thumb) 72%, transparent) transparent;
+  }
+  .rules-table .ant-table-middle.ant-table-scroll-horizontal :is(.ant-table-thead, .ant-table-tbody) > tr > :is(th, td) {
+    padding: 9px;
+  }
+  .rules-table .ant-table-tbody > tr > td:has(> .rule-cell) { vertical-align: top; }
+  .rules-table .rule-cell { display: grid; gap: 2px; min-width: 0; }
+  .rules-table .rule-cell .rule-name {
+    display: -webkit-box;
+    -webkit-box-orient: vertical;
+    -webkit-line-clamp: 2;
+    overflow: hidden;
+  }
+  .rules-table .button-link.rule-entry-address {
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+    color: var(--muted);
+    font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+    font-size: 12px;
+  }
+  .rules-table .button-link.rule-cell-link { color: var(--accent); font-size: 12px; }
+  .rules-table .rule-entry-meta .protocol-label { font-size: 11px; padding: 1px 5px; }
   .table-section .operator-toolbar { display: grid; grid-template-columns: minmax(0, 1fr); gap: 6px; }
   .table-section .operator-toolbar > .operator-actions:empty { display: none; }
   :is(.table-section, .settings-page) :is(.operator-filters, .operator-actions.ant-space, .operator-actions > .ant-space, .list-toolbar, .batch-toolbar) {
@@ -1281,6 +1310,17 @@ textarea.dialog-code.ant-input:hover, textarea.dialog-code.ant-input:focus { bor
     flex: none;
     white-space: nowrap;
   }
+  .rules-table .operator-filters.rule-filters {
+    display: grid;
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    overflow: visible;
+    padding: 2px 0;
+  }
+  .rules-table .rule-filters:not(.rule-filters-admin) > .ant-space-item:first-child { grid-column: 1 / -1; }
+  .rules-table .rule-filters > .ant-space-item { min-width: 0; }
+  .rules-table .rule-filters :is(.ant-input-affix-wrapper, .ant-input-number, .ant-select) { width: 100%; }
+  .rules-table .rule-pagination { gap: 6px 8px; }
+  .rules-table .rule-pagination > .ant-space { flex-wrap: nowrap; gap: 5px; }
   .table-section .batch-toolbar { padding-inline: 8px; }
   .content > .table-section:only-child > .table-footer { margin-top: 4px; }
   .table-section .page-head > .ant-space { flex: none; flex-wrap: nowrap; gap: 4px; }
@@ -1293,7 +1333,9 @@ textarea.dialog-code.ant-input:hover, textarea.dialog-code.ant-input:focus { bor
 @media (max-width: 490px) {
   .equipment-editor, .rule-editor .details-grid { grid-template-columns: 1fr; gap: 0; }
   .editor-toggle-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 0 12px; }
-  .rule-summary > div:not(:last-child) { margin-inline-end: 9px; padding-inline-end: 9px; }
+  .rule-summary { display: grid; grid-template-columns: minmax(0, 1.4fr) minmax(0, 1fr); gap: 5px 10px; font-size: 12px; }
+  .rule-summary > div:first-child { grid-column: 1 / -1; }
+  .rule-summary > div:not(:last-child) { margin: 0; padding: 0; border: 0; }
 }
 
 :where(html, .sidebar nav, .ant-modal-body, .ant-modal-confirm-body, .ant-drawer-body, .ant-table-content, .ant-table-body, textarea) {

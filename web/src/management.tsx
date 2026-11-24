@@ -1490,6 +1490,7 @@ export default function Management({ page, user, refresh }: Props) {
           [
             {
               title: "设备组",
+              width: narrow ? 128 : undefined,
               render: (_: unknown, r: Group) => (
                 <div>
                   <span className="data-title">{r.name}</span>
@@ -1506,6 +1507,7 @@ export default function Management({ page, user, refresh }: Props) {
             {
               title: "连接地址 / 端口池",
               key: "ports",
+              width: narrow ? 184 : undefined,
               render: (_: unknown, r: Group) =>
                 r.kind !== "entry" && r.kind !== "both" ? "—" : <div>
                   <div className="address-lines">{r.connectHost || "自动"}</div><span className="mono muted">{r.portRanges || r.firstPort + " – " + r.lastPort}</span>

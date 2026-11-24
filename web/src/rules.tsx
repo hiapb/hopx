@@ -36,6 +36,7 @@ import {
   Trash2,
   ArrowRightLeft,
   ChevronDown,
+  ChevronLeft,
   ChevronRight,
 } from "lucide-react";
 import { api, bytes, date, hasPlan, planExpiryLabel, ruleLimitLabel, useData } from "./api";
@@ -101,6 +102,7 @@ export default function Rules({ user, initialQuery, refreshUser, siteProbeInterv
   const params = new URLSearchParams(initialQuery);
   const ruleID = Number(params.get("id") || params.get("goto")) || undefined;
   const adminSearch = user.admin && params.has("search");
+  const ruleTableWidth = (narrow ? 916 : wide ? 1120 : 1060) + (adminSearch ? 130 : 0);
   const [showSearch, setShowSearch] = useState(adminSearch);
   const [detailFilters, setDetailFilters] = useState<RuleFilters>({});
   const [searchForm] = Form.useForm();
@@ -263,15 +265,13 @@ export default function Rules({ user, initialQuery, refreshUser, siteProbeInterv
       return (ipv6 ? "[" + host + "]" : host) + ":" + port;
     });
   };
-  const describePort = (rule: Rule) => {
-    if (!rule.entry) return "—";
-    const protocol = rule.tlsShared || rule.tlsSharedPort
+  const protocolLabel = (rule: Rule) => rule.tlsShared || rule.tlsSharedPort
       ? "共享 TLS"
       : rule.protocol === "haproxy-tcp" ? "HAProxy TCP"
         : rule.protocol === "haproxy-both" ? "HAProxy TCP + UDP"
         : (rule.effectiveNetwork || rule.protocol).replace("both", "TCP + UDP").toUpperCase();
-    return connectionAddresses(rule)[0] + " / " + protocol;
-  };
+  const describePort = (rule: Rule, address = connectionAddresses(rule)[0]) =>
+    rule.entry ? address + " / " + protocolLabel(rule) : "—";
   const detail = list.value.find((rule) => rule.id === detailID);
 
   function resetPage() {
@@ -648,7 +648,7 @@ export default function Rules({ user, initialQuery, refreshUser, siteProbeInterv
             </>}
             {narrow && listActions}
           </Space>
-          <Space wrap={!narrow} className="operator-filters rule-filters">
+          <Space wrap={!narrow} className={"operator-filters rule-filters" + (user.admin ? " rule-filters-admin" : "")}>
             <Input
               aria-label="搜索规则"
               placeholder="搜索规则"
@@ -669,6 +669,7 @@ export default function Rules({ user, initialQuery, refreshUser, siteProbeInterv
               />
             )}
             <Select
+              aria-label="规则状态筛选"
               value={status}
               options={[
                 { value: "", label: "全部状态" },
@@ -679,6 +680,7 @@ export default function Rules({ user, initialQuery, refreshUser, siteProbeInterv
               onChange={(value) => { setStatus(value); resetPage(); }}
             />
             <Select
+              aria-label="规则排序"
               value={sort}
               options={[
                 { value: "", label: "最新规则" },
@@ -764,13 +766,14 @@ export default function Rules({ user, initialQuery, refreshUser, siteProbeInterv
           dataSource={list.value}
           pagination={false}
           showHeader={!narrow || list.value.length > 0}
-          scroll={narrow && !list.value.length ? undefined : { x: adminSearch ? 980 : 870 }}
+          tableLayout="fixed"
+          scroll={narrow && !list.value.length ? undefined : { x: ruleTableWidth }}
           onChange={(_, __, sorter, extra) => {
             if (extra.action !== "sort") return;
             const active = Array.isArray(sorter) ? sorter[0] : sorter;
             sortRules(active?.order ? String(active.columnKey) : "", active?.order === "descend" ? "desc" : "asc");
           }}
-          rowSelection={{ selectedRowKeys: selected, onChange: setSelected }}
+          rowSelection={{ selectedRowKeys: selected, onChange: setSelected, columnWidth: narrow ? 36 : undefined }}
           columns={[
             ...(adminSearch ? [{ title: "用户", key: "owner", width: 130, render: (_: unknown, rule: Rule) => (
               <a href={"#/rules?owner=" + rule.owner}>{rule.ownerName || "UID " + rule.owner}</a>
@@ -778,47 +781,69 @@ export default function Rules({ user, initialQuery, refreshUser, siteProbeInterv
             {
               title: "规则名称",
               ...sortable("name"),
+              width: narrow ? 102 : 156,
               render: (_, r) => (
-                <>
-                  <button className="button-link rule-name" onClick={() => setDetailID(r.id)}>{r.name}</button>
+                <div className="rule-cell">
+                  <button type="button" className="button-link rule-name" onClick={() => setDetailID(r.id)}>{r.name || "未命名规则"}</button>
                   <div className="data-secondary">
                     #{r.id}
                     {r.label ? " · " + r.label : ""}
                   </div>
                   {adminSearch && <a className="data-secondary" href={"#/rules?owner=" + r.owner + "&id=" + r.id}>定位规则</a>}
-                </>
+                </div>
               ),
             },
             {
               title: "入口",
               ...sortable("entry"),
-              render: (_, r) => (
-                <>
+              width: narrow ? 188 : undefined,
+              render: (_, r) => {
+                const addresses = connectionAddresses(r);
+                return <div className="rule-cell">
                   <span className="data-title">{r.entry ? names.get(r.entry) || r.entry : "未选择"}</span>
-                  <span className="data-secondary mono">{describePort(r)}</span>
-                  {connectionAddresses(r).length > 1 && <Button type="link" size="small" onClick={() => setAddressRule(r)}>
-                    {connectionAddresses(r).length} 个连接地址
-                  </Button>}
-                </>
-              ),
+                  {narrow ? addresses.length > 0 && <>
+                    <button type="button" className="button-link rule-entry-address mono"
+                      aria-label={"查看入口连接地址 " + addresses[0]} onClick={() => setAddressRule(r)}>{addresses[0]}</button>
+                    <div className="rule-entry-meta">
+                      <span className="protocol-label">{protocolLabel(r)}</span>
+                      {addresses.length > 1 && <button type="button" className="button-link rule-cell-link" onClick={() => setAddressRule(r)}>
+                        {addresses.length} 个地址
+                      </button>}
+                    </div>
+                  </> : <>
+                    <span className="data-secondary mono">{describePort(r, addresses[0])}</span>
+                    {addresses.length > 1 && <Button type="link" size="small" onClick={() => setAddressRule(r)}>
+                      {addresses.length} 个连接地址
+                    </Button>}
+                  </>}
+                </div>;
+              },
             },
             {
               title: "出口 / 目标",
               ...sortable("exit"),
-              render: (_, r) => (
-                <>
+              width: narrow ? 220 : undefined,
+              render: (_, r) => {
+                const targets = r.targets ?? [];
+                return <div className="rule-cell">
                   {r.protocol === "haproxy-both" ? <>
                     <span className="data-title">TCP · HAProxy 直出</span>
                     <span className="data-secondary">UDP · {describePath(r.path, r.routeRepair?.path)}</span>
                   </> : <span className="data-title">{r.tlsShared ? "按 SNI 分流" : r.protocol === "haproxy-tcp" ? "HAProxy 直出" : describePath(r.path, r.routeRepair?.path)}</span>}
-                  <span className="data-secondary mono">{r.targets?.join(", ")}</span>
+                  {narrow ? <>
+                    {targets.slice(0, 2).map((target, index) => <span className="data-secondary mono table-address" key={index}>{target}</span>)}
+                    {targets.length > 2 && <button type="button" className="button-link rule-cell-link" onClick={() => setDetailID(r.id)}>
+                      查看全部 {targets.length} 个目标
+                    </button>}
+                  </> : <span className="data-secondary mono">{r.targets?.join(", ")}</span>}
                   {(!!r.backupPath?.length || r.routeRepair?.backupPath) && <span className="data-secondary">{r.protocol === "haproxy-both" ? "UDP 备用" : "备用"} · {describePath(r.backupPath, r.routeRepair?.backupPath)}</span>}
-                </>
-              ),
+                </div>;
+              },
             },
             {
               title: "已用流量",
               ...sortable("traffic"),
+              width: 106,
               align: "right",
               render: (_, r) => (
                 <span className="mono">{((r.in + r.out) / 2 ** 30).toFixed(2)} GiB</span>
@@ -827,12 +852,13 @@ export default function Rules({ user, initialQuery, refreshUser, siteProbeInterv
             {
               title: "状态",
               key: "status",
+              width: narrow ? 112 : 120,
               render: (_, r) => <RuleStatus rule={r} />,
             },
             {
               title: "操作",
               key: "actions",
-              width: wide ? 236 : 152,
+              width: narrow ? 152 : wide ? 248 : 188,
               render: (_, r) => (
                 <Space className="row-actions" size={2}>
                   {!narrow && !r.routeRepair && <IconAction label={r.enabled ? "暂停规则" : "启动规则"}
@@ -886,10 +912,12 @@ export default function Rules({ user, initialQuery, refreshUser, siteProbeInterv
             },
           ]}
         />
-        <div className="table-footer">
+        <div className="table-footer rule-pagination">
           <span className="muted">共 {totals.value.total} 条规则</span>
           <Space wrap>
             <Button
+              aria-label="上一页"
+              icon={narrow ? <ChevronLeft size={16} /> : undefined}
               disabled={list.busy || (sort ? offset === 0 : !cursors.length)}
               onClick={() => {
                 if (sort) {
@@ -901,9 +929,11 @@ export default function Rules({ user, initialQuery, refreshUser, siteProbeInterv
                 setSelected([]);
               }}
             >
-              上一页
+              {!narrow && "上一页"}
             </Button>
             <Button
+              aria-label="下一页"
+              icon={narrow ? <ChevronRight size={16} /> : undefined}
               disabled={list.busy || totals.busy || (sort ? offset : cursors.length * pageSize) + list.value.length >= totals.value.total}
               onClick={() => {
                 if (sort) {
@@ -915,7 +945,7 @@ export default function Rules({ user, initialQuery, refreshUser, siteProbeInterv
                 setSelected([]);
               }}
             >
-              下一页
+              {!narrow && "下一页"}
             </Button>
             <Select aria-label="每页规则数" value={pageSize} onChange={(size) => { setPageSize(size); resetPage(); }}
               options={[10, 20, 50, 100, 200, 500, 1000].map(size => ({ value: size, label: size + " 条/页" }))} />
@@ -996,7 +1026,12 @@ export default function Rules({ user, initialQuery, refreshUser, siteProbeInterv
             <div className="details-grid rule-details">
               <dl>
                 <dt>入口</dt>
-                <dd>{detail.entry ? names.get(detail.entry) || detail.entry : "未选择"}<div className="mono">{describePort(detail)}</div></dd>
+              <dd>{detail.entry ? names.get(detail.entry) || detail.entry : "未选择"}
+                {detail.entry > 0 && <>
+                  <div className="rule-entry-meta"><span className="protocol-label">{protocolLabel(detail)}</span></div>
+                  {connectionAddresses(detail).map((address, index) => <div className="mono table-address" key={index}>{address}</div>)}
+                </>}
+              </dd>
               </dl>
               <dl><dt>规则编号</dt><dd>#{detail.id}</dd></dl>
               {detail.protocol === "haproxy-tcp" || detail.protocol === "haproxy-both" ? <>
@@ -1008,7 +1043,7 @@ export default function Rules({ user, initialQuery, refreshUser, siteProbeInterv
               <dl><dt>出站流量</dt><dd>{bytes(detail.out)}</dd></dl>
               <dl>
                 <dt>目标地址</dt>
-                <dd>{detail.tlsShared ? "按 SNI 分流" : detail.targets?.map((target) => <div className="mono" key={target}>{target}</div>)}</dd>
+                <dd>{detail.tlsShared ? "按 SNI 分流" : detail.targets?.map((target, index) => <div className="mono table-address" key={index}>{target}</div>)}</dd>
               </dl>
             </div>
           </>
