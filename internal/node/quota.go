@@ -33,7 +33,7 @@ func (q *quotaBook) updateRules(rules []wire.Forward) {
 	defer q.mu.Unlock()
 	q.rules = make(map[quotaKey]bool)
 	for _, rule := range rules {
-		if rule.Enabled && rule.QuotaManaged {
+		if rule.Enabled && rule.QuotaManaged && (!rule.HAProxy || rule.Protocol != "tcp") {
 			q.rules[quotaKey{rule.Owner, rule.QuotaEpoch}] = true
 		}
 	}

@@ -44,10 +44,13 @@ func TestListenerDensityUnderLoad(t *testing.T) {
 		}
 	}()
 	rules := make([]wire.Forward, 0, 1000)
+	expires := time.Now().Add(time.Hour).Unix()
 	for i := range 999 {
-		rules = append(rules, wire.Forward{Rule: wire.Rule{ID: int64(i + 1), Port: 20000 + i, Enabled: true, Protocol: "tcp", Targets: []string{remote}}})
+		rules = append(rules, wire.Forward{Expires: expires, Ratio: 1000,
+			Rule: wire.Rule{ID: int64(i + 1), Port: 20000 + i, Enabled: true, Protocol: "tcp", Targets: []string{remote}}})
 	}
-	rules = append(rules, wire.Forward{Rule: wire.Rule{ID: 1000, Port: 20999, Enabled: true, Protocol: "udp", Targets: []string{udp.LocalAddr().String()}}})
+	rules = append(rules, wire.Forward{Expires: expires, Ratio: 1000,
+		Rule: wire.Rule{ID: 1000, Port: 20999, Enabled: true, Protocol: "udp", Targets: []string{udp.LocalAddr().String()}}})
 	config := wire.Config{Revision: "load", Rules: rules}
 	started := time.Now()
 	if err = engine.Apply(ctx, config, nil); err != nil {

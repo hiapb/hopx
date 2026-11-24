@@ -28,6 +28,7 @@ func TestAdministrativeOperationsAndRuleOwnership(t *testing.T) {
 	member := &http.Client{Jar: jar}
 	base := server.URL + "/api"
 	testRequest(t, admin, "POST", base+"/login", nil, map[string]string{"name": "admin", "password": "test-password-123"}, 200, nil)
+	subscribeTestAdmin(t, admin, base)
 	account := map[string]string{"name": "member", "password": "test-password-123"}
 	testRequest(t, admin, "POST", base+"/admin/users", nil, account, 201, nil)
 	testRequest(t, member, "POST", base+"/login", nil, account, 200, nil)
@@ -36,11 +37,13 @@ func TestAdministrativeOperationsAndRuleOwnership(t *testing.T) {
 	memberPath := fmt.Sprintf("%s/admin/users/%d", base, user.ID)
 	testRequest(t, member, "GET", base+"/admin/settings", nil, nil, 403, nil)
 	testRequest(t, member, "PUT", memberPath+"/plan", nil, map[string]int{"planId": 0}, 403, nil)
+	var memberGroup named
+	testRequest(t, admin, "POST", base+"/admin/user-groups", nil, named{Name: "Members"}, 200, &memberGroup)
 	var plan Plan
-	testRequest(t, admin, "POST", base+"/admin/plans", nil, Plan{Name: "test", Duration: 30, Rules: 15, Quota: 200}, 200, &plan)
-	testRequest(t, admin, "PUT", memberPath+"/plan", nil, map[string]any{"planId": plan.ID, "quota": true, "rules": true}, 204, nil)
+	testRequest(t, admin, "POST", base+"/admin/plans", nil, Plan{Name: "test", Duration: 30, Rules: 15, Quota: 200, GroupID: memberGroup.ID}, 200, &plan)
+	testRequest(t, admin, "PUT", memberPath+"/plan", nil, map[string]any{"planId": plan.ID, "quota": true, "rules": true, "group": true}, 204, nil)
 	testRequest(t, member, "GET", base+"/me", nil, nil, 200, &user)
-	if user.Quota != 200 || user.MaxRules != 15 || user.PlanID != plan.ID {
+	if user.Quota != 200 || user.MaxRules != 15 || user.PlanID != plan.ID || !user.AutoRenew {
 		t.Fatalf("plan fields not synchronized: %+v", user)
 	}
 	testRequest(t, admin, "PUT", memberPath+"/referral", nil, map[string]any{"custom": true, "rate": 1500}, 204, nil)
@@ -147,9 +150,11 @@ func TestAdministrativeOperationsAndRuleOwnership(t *testing.T) {
 	testRequest(t, admin, "POST", base+"/node/register", map[string]string{"Authorization": "Bearer " + invite["token"].(string)}, wire.Registration{Name: "node"}, 401, nil)
 
 	var personalEntry, siteExit wire.DeviceGroup
-	testRequest(t, admin, "POST", base+"/admin/groups", nil, wire.DeviceGroup{Name: "site exit", Kind: "exit"}, 200, &siteExit)
+	testRequest(t, admin, "POST", base+"/admin/groups", nil,
+		wire.DeviceGroup{Name: "site exit", Kind: "exit", UserGroups: []int64{memberGroup.ID}}, 200, &siteExit)
 	testRequest(t, admin, "POST", base+"/admin/groups", nil, wire.DeviceGroup{
-		Name: "personal ingress", Kind: "entry", Routing: wire.RelayRouting{IngressMode: "personal"}, AllowedTo: []int64{siteExit.ID},
+		Name: "personal ingress", Kind: "entry", UserGroups: []int64{memberGroup.ID},
+		Routing: wire.RelayRouting{IngressMode: "personal"}, AllowedTo: []int64{siteExit.ID},
 	}, 200, &personalEntry)
 	input := wire.Rule{Owner: user.ID, Name: "personal only", Entry: personalEntry.ID, Targets: []string{"127.0.0.1:1024"}, Enabled: true}
 	_, err = panel.db.Exec("UPDATE users SET expires=unixepoch()+3600 WHERE id=?", user.ID)
@@ -216,6 +221,28 @@ func TestAccountingAndRenewalPreviews(t *testing.T) {
 	testRequest(t, admin, "GET", base+"/me", nil, nil, 200, &user)
 	if user.Balance != 400 {
 		t.Fatalf("unexpected balance after retry: %d", user.Balance)
+	}
+}
+
+func TestAutomaticRenewalSkipsUnfundedAccounts(t *testing.T) {
+	panel, err := Open(Options{Database: filepath.Join(t.TempDir(), "renew.db"), AdminPassword: "test-password-123"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer panel.Close()
+	_, err = panel.db.Exec(`
+		INSERT INTO plans(id,name,description,price,duration,quota,rules,group_id) VALUES (1,'Paid','',100,30,0,0,0);
+		WITH RECURSIVE numbers(n) AS (VALUES(2) UNION ALL SELECT n+1 FROM numbers WHERE n<102)
+		INSERT INTO users(id,name,password,invite,plan_id,expires,auto_renew,balance)
+			SELECT n,'member'||n,X'00','fixture'||n,1,unixepoch()-60,1,CASE WHEN n=102 THEN 100 ELSE 0 END FROM numbers;
+	`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	panel.renew()
+	var id int64
+	if err = panel.db.QueryRow("SELECT user_id FROM orders WHERE kind='renew'").Scan(&id); err != nil || id != 102 {
+		t.Fatalf("funded account was not renewed: user %d, %v", id, err)
 	}
 }
 

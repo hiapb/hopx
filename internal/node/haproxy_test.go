@@ -2,6 +2,7 @@ package node
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"net"
@@ -14,6 +15,103 @@ import (
 
 	"hopx/internal/wire"
 )
+
+func TestForwardStopsWhenSubscriptionEnds(t *testing.T) {
+	for _, mode := range []string{"builtin", "haproxy", "haproxy-metered"} {
+		t.Run(mode, func(t *testing.T) {
+			var binary string
+			if mode != "builtin" {
+				var err error
+				binary, err = exec.LookPath("haproxy")
+				if err != nil || runtime.GOOS != "linux" {
+					t.Skip("requires Linux with HAProxy installed")
+				}
+			}
+			ctx, cancel := context.WithCancel(context.Background())
+			defer cancel()
+			engine := NewEngine("127.0.0.1", 16, 64)
+			engine.proxy.binary = binary
+			defer engine.Close()
+			target, address, siblingAddress := tcpEcho(t, 's'), freeTCP(t), freeTCP(t)
+			port := func(address string) int {
+				_, value, _ := net.SplitHostPort(address)
+				result, _ := strconv.Atoi(value)
+				return result
+			}
+			rule := wire.Forward{HAProxy: binary != "", Expires: time.Now().Add(3 * time.Second).Unix(),
+				Rule: wire.Rule{ID: 1, Enabled: true, Protocol: "tcp", Port: port(address), Targets: []string{target}}}
+			sibling := rule
+			sibling.ID, sibling.Port, sibling.Expires = 2, port(siblingAddress), time.Now().Add(time.Minute).Unix()
+			if mode == "haproxy-metered" {
+				rule.Expires = sibling.Expires
+				rule.QuotaManaged, rule.HAProxyRatio = true, 1000
+				engine.proxy.reportUntil = time.Now().Add(2 * time.Second)
+			}
+			if err := engine.Apply(ctx, wire.Config{Revision: "paid", Rules: []wire.Forward{rule, sibling}}, nil); err != nil {
+				t.Fatal(err)
+			}
+			dial := func(address string) net.Conn {
+				t.Helper()
+				conn, err := net.DialTimeout("tcp", address, time.Second)
+				if err != nil {
+					t.Fatal(err)
+				}
+				t.Cleanup(func() { _ = conn.Close() })
+				exercise(t, conn, 's')
+				return conn
+			}
+			requireClosed := func(conn net.Conn) {
+				t.Helper()
+				_ = conn.SetReadDeadline(time.Now().Add(5 * time.Second))
+				_, err := conn.Read(make([]byte, 1))
+				if err == nil || errors.Is(err, os.ErrDeadlineExceeded) {
+					t.Fatalf("forwarding connection remained open: %v", err)
+				}
+			}
+			client, other := dial(address), dial(siblingAddress)
+			requireClosed(client)
+			exercise(t, other, 's')
+			if conn, err := net.DialTimeout("tcp", address, time.Second); err == nil {
+				defer conn.Close()
+				requireClosed(conn)
+			}
+
+			rule.Expires = time.Now().Add(time.Minute).Unix()
+			engine.authorizeProxyTraffic(5 * time.Second)
+			if err := engine.Apply(ctx, wire.Config{Revision: "renewed", Rules: []wire.Forward{rule, sibling}}, nil); err != nil {
+				t.Fatal(err)
+			}
+			client = dial(address)
+			blocked, err := net.Listen("tcp", "127.0.0.1:0")
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer blocked.Close()
+			conflict := sibling
+			conflict.ID, conflict.Port = 3, blocked.Addr().(*net.TCPAddr).Port
+			err = engine.Apply(ctx, wire.Config{Revision: "blocked", Rules: []wire.Forward{sibling, conflict}}, nil)
+			if err == nil {
+				t.Fatal("applying a conflicting configuration succeeded")
+			}
+			requireClosed(client)
+			dial(siblingAddress)
+			if err := engine.Apply(ctx, wire.Config{Revision: "removed", Rules: []wire.Forward{sibling}}, nil); err != nil {
+				// HAProxy can wait for the previous process to drain before accepting a further revision.
+				_ = other.Close()
+				deadline := time.Now().Add(5 * time.Second)
+				for err != nil && time.Now().Before(deadline) {
+					time.Sleep(25 * time.Millisecond)
+					err = engine.Apply(ctx, wire.Config{Revision: "removed", Rules: []wire.Forward{sibling}}, nil)
+				}
+				if err != nil {
+					t.Fatal(err)
+				}
+			}
+			requireClosed(client)
+			dial(siblingAddress)
+		})
+	}
+}
 
 func TestManagedHAProxy(t *testing.T) {
 	binary, err := exec.LookPath("haproxy")

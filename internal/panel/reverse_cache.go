@@ -49,20 +49,20 @@ func (s *Server) reverseRouteSnapshot(group int64) ([]reverseRoute, error) {
 	rows, err := s.db.Query(`WITH links AS (
 		SELECT r.entry, json_extract(r.json,'$.path[0]') AS egress,
 			coalesce(json_array_length(r.json,'$.path'),0) AS hops, r.owner
-		FROM rules r WHERE json_extract(r.json,'$.enabled')=1
+		FROM rules r WHERE json_extract(r.json,'$.enabled')=1 AND ` + ruleRouteReadySQL + `
 		UNION ALL
 		SELECT r.entry, json_extract(r.json,'$.backupPath[0]'),
 			coalesce(json_array_length(r.json,'$.backupPath'),0), r.owner
-		FROM rules r WHERE json_extract(r.json,'$.enabled')=1
+		FROM rules r WHERE json_extract(r.json,'$.enabled')=1 AND ` + ruleRouteReadySQL + `
 		UNION ALL
 		SELECT r.entry, g.fallback_group, 1, r.owner
 		FROM rules r JOIN groups g ON g.id=json_extract(r.json,'$.path[0]')
-		WHERE json_extract(r.json,'$.enabled')=1 AND json_array_length(r.json,'$.path')=1
+		WHERE json_extract(r.json,'$.enabled')=1 AND ` + ruleRouteReadySQL + ` AND json_array_length(r.json,'$.path')=1
 			AND coalesce(json_array_length(r.json,'$.backupPath'),0)=0 AND g.fallback_group>0
 	)
 	SELECT DISTINCT links.entry, links.egress, links.hops, u.id, u.admin, u.group_id
 	FROM links JOIN users u ON u.id=links.owner
-	WHERE links.hops>0 AND u.banned=0 AND (u.admin=1 OR (u.expires>unixepoch() AND (u.quota=0 OR u.used<u.quota)))`)
+	WHERE links.hops>0 AND ` + ruleServiceActiveSQL)
 	if err != nil {
 		return nil, err
 	}
@@ -137,7 +137,8 @@ func (s *Server) invalidateReverseRoutes(pattern string) {
 		"POST /api/rules/batch/by-port", "POST /api/groups/{id}/operations", "POST /api/admin/groups",
 		"PUT /api/admin/groups/{id}", "DELETE /api/admin/groups/{id}", "DELETE /api/tunnels/{id}",
 		"PUT /api/tunnels/{id}", "POST /api/tunnels", "POST /api/admin/rules/cleanup", "DELETE /api/admin/users/{id}",
-		"POST /api/admin/users/cleanup", "PUT /api/admin/users/{id}", "PUT /api/admin/users/{id}/plan":
+		"POST /api/admin/users/cleanup", "PUT /api/admin/users/{id}", "PUT /api/admin/users/{id}/plan",
+		"POST /api/plans/{id}/buy", "POST /api/me/renew", "POST /api/redeem", "POST /api/admin/plans/{id}/push":
 		s.reverseMu.Lock()
 		s.reverseRoutes = nil
 		s.reverseMu.Unlock()

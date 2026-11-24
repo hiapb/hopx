@@ -48,7 +48,16 @@ func scanGroup(row scanner) (g wire.DeviceGroup, e error) {
 }
 
 func canUse(u User, g wire.DeviceGroup) bool {
-	return u.Admin || g.Owner == u.ID || (g.Owner == 0 && ((len(g.UserGroups) > 0 && slices.Contains(g.UserGroups, u.Group)) || (len(g.UserGroups) == 0 && (g.UserGroup == 0 || g.UserGroup == u.Group))))
+	if u.Admin || (g.Owner > 0 && g.Owner == u.ID) {
+		return true
+	}
+	if g.Owner != 0 || u.Group <= 0 {
+		return false
+	}
+	if len(g.UserGroups) != 0 {
+		return slices.Contains(g.UserGroups, u.Group)
+	}
+	return g.UserGroup == u.Group
 }
 
 func (s *Server) groups() ([]wire.DeviceGroup, error) {
@@ -178,10 +187,24 @@ func (s *Server) saveGroup(w http.ResponseWriter, r *http.Request, u User) {
 	}
 	if personal {
 		g.Owner, g.Kind, g.Ratio, g.UserGroup = u.ID, "exit", 1000, u.Group
+		g.UserGroups = nil
 		g.AllowedFrom, g.AllowedTo = nil, nil
 		g.Folder, g.Note, g.ShowOrder, g.HideStatus = "", "", 0, false
 		g.ConnectHost, g.FallbackGroup = "", 0
 		g.Routing = wire.RelayRouting{ApplyRelayMode: g.RelayMode != ""}
+	} else {
+		// Legacy clients can send a single group. An explicit list takes precedence,
+		// including an empty list that clears an existing authorization.
+		if g.UserGroups == nil && g.UserGroup != 0 {
+			g.UserGroups = []int64{g.UserGroup}
+		}
+		g.UserGroup = 0
+		if slices.ContainsFunc(g.UserGroups, func(id int64) bool { return id <= 0 }) {
+			fail(w, 400, "授权请选择非默认用户组")
+			return
+		}
+		slices.Sort(g.UserGroups)
+		g.UserGroups = slices.Compact(g.UserGroups)
 	}
 	g.Name = strings.TrimSpace(g.Name)
 	if g.DefaultNetwork == "" {
@@ -313,6 +336,21 @@ func (s *Server) saveGroup(w http.ResponseWriter, r *http.Request, u User) {
 	from, _ := json.Marshal(g.AllowedFrom)
 	to, _ := json.Marshal(g.AllowedTo)
 	users, _ := json.Marshal(g.UserGroups)
+	if len(g.UserGroups) != 0 {
+		var exists bool
+		err := tx.QueryRow(`SELECT NOT EXISTS (
+			SELECT 1 FROM json_each(?) AS selected
+			WHERE NOT EXISTS (SELECT 1 FROM user_groups WHERE id=selected.value)
+		)`, string(users)).Scan(&exists)
+		if err != nil {
+			dbFailure(w, err)
+			return
+		}
+		if !exists {
+			fail(w, 400, "授权用户组不存在")
+			return
+		}
+	}
 	chain, _ := json.Marshal(g.Chain)
 	reverse, _ := json.Marshal(g.ReverseGroups)
 	ingress, _ := json.Marshal(g.Ingress)
@@ -381,14 +419,25 @@ func (s *Server) deleteGroup(w http.ResponseWriter, r *http.Request, u User) {
 }
 
 type ruleRow struct {
-	Runtime    string `json:"runtime"`
-	ReportedAt int64  `json:"reportedAt,omitempty"`
-	OwnerName  string `json:"ownerName,omitempty"`
+	Runtime      string `json:"runtime"`
+	ReportedAt   int64  `json:"reportedAt,omitempty"`
+	OwnerName    string `json:"ownerName,omitempty"`
+	ServiceBlock string `json:"serviceBlock,omitempty"`
 	wire.Rule
 	In               int64  `json:"in"`
 	Out              int64  `json:"out"`
 	EffectiveNetwork string `json:"effectiveNetwork"`
 }
+
+// Use the rule owner's subscription for creation, publication and diagnostics.
+const ruleServiceBlockSQL = `CASE
+	WHEN u.banned=1 THEN '账号已封禁'
+	WHEN u.plan_id<=0 OR NOT EXISTS(SELECT 1 FROM plans WHERE id=u.plan_id) THEN '请先订购套餐'
+	WHEN u.expires<=unixepoch() THEN '套餐已到期，请续费'
+	WHEN u.quota>0 AND u.used>=u.quota THEN '套餐流量已用完，请续费'
+	ELSE '' END`
+
+const ruleServiceActiveSQL = "(" + ruleServiceBlockSQL + ")=''"
 
 func (s *Server) ruleCount(w http.ResponseWriter, r *http.Request, u User) {
 	where, args, err := s.ruleFilters(r, u)
@@ -402,7 +451,25 @@ func (s *Server) ruleCount(w http.ResponseWriter, r *http.Request, u User) {
 		dbFailure(w, err)
 		return
 	}
-	respond(w, 200, map[string]int{"total": total})
+	out := struct {
+		Total        int    `json:"total"`
+		Owner        int64  `json:"owner,omitempty"`
+		ServiceBlock string `json:"serviceBlock,omitempty"`
+	}{Total: total}
+	if u.Admin {
+		if owner, _ := strconv.ParseInt(r.URL.Query().Get("owner"), 10, 64); owner > 0 {
+			out.Owner = owner
+			err := s.db.QueryRowContext(r.Context(), "SELECT "+ruleServiceBlockSQL+" FROM users u WHERE id=?", owner).Scan(&out.ServiceBlock)
+			switch {
+			case errors.Is(err, sql.ErrNoRows):
+				out.ServiceBlock = "用户不存在"
+			case err != nil:
+				dbFailure(w, err)
+				return
+			}
+		}
+	}
+	respond(w, 200, out)
 }
 
 func (s *Server) ruleFilters(r *http.Request, u User) (string, []any, error) {
@@ -428,17 +495,17 @@ func (s *Server) ruleFilters(r *http.Request, u User) (string, []any, error) {
 		args = append(args, name)
 	}
 	if entry, _ := strconv.ParseInt(r.URL.Query().Get("entry"), 10, 64); entry > 0 {
-		q += " AND r.entry=?"
+		q += " AND r.entry=? AND coalesce(json_extract(r.json,'$.routeRepair.entry'),0)=0"
 		args = append(args, entry)
 	}
 	if exit := r.URL.Query().Get("exit"); exit == "0" {
-		q += " AND coalesce(json_array_length(json_extract(r.json,'$.path')),0)=0"
+		q += " AND coalesce(json_array_length(json_extract(r.json,'$.path')),0)=0 AND coalesce(json_extract(r.json,'$.routeRepair.path'),0)=0"
 	} else if id, _ := strconv.ParseInt(exit, 10, 64); id > 0 {
 		q += " AND json_extract(r.json,'$.path[#-1]')=?"
 		args = append(args, id)
 	}
 	if port, _ := strconv.Atoi(r.URL.Query().Get("port")); port >= 1 && port <= 65535 {
-		q += " AND r.port=?"
+		q += " AND r.port=? AND coalesce(json_extract(r.json,'$.routeRepair.entry'),0)=0"
 		args = append(args, port)
 	}
 	if target := strings.TrimSpace(r.URL.Query().Get("target")); target != "" {
@@ -452,7 +519,7 @@ func (s *Server) ruleFilters(r *http.Request, u User) (string, []any, error) {
 		q += " AND coalesce(json_extract(r.json,'$.label'),'')=''"
 	}
 	if state := r.URL.Query().Get("state"); state == "enabled" || state == "disabled" {
-		q += " AND coalesce(json_extract(r.json,'$.enabled'),0)=?"
+		q += " AND (coalesce(json_extract(r.json,'$.enabled'),0)=1 AND " + ruleRouteReadySQL + ")=?"
 		args = append(args, state == "enabled")
 	} else if state == "failed" {
 		ids, err := s.failedRuleEntries()
@@ -460,7 +527,7 @@ func (s *Server) ruleFilters(r *http.Request, u User) (string, []any, error) {
 			return "", nil, err
 		}
 		groups, _ := json.Marshal(ids)
-		q += " AND json_extract(r.json,'$.enabled')=1 AND r.entry IN (SELECT value FROM json_each(?))"
+		q += " AND json_extract(r.json,'$.enabled')=1 AND " + ruleRouteReadySQL + " AND r.entry IN (SELECT value FROM json_each(?))"
 		args = append(args, string(groups))
 	}
 	return q, args, nil
@@ -482,9 +549,10 @@ func (s *Server) listRules(w http.ResponseWriter, r *http.Request, u User) {
 	}
 	ownerName := "''"
 	if u.Admin && r.URL.Query().Get("owners") == "1" {
-		ownerName = "(SELECT name FROM users WHERE id=r.owner)"
+		ownerName = "u.name"
 	}
-	q := "SELECT r.id,r.owner,r.json,coalesce(t.inbound,0),coalesce(t.outbound,0),g.default_network,g.ingress," + ownerName + " FROM rules r JOIN groups g ON g.id=r.entry LEFT JOIN traffic t ON r.id=t.rule_id" + where + " AND r.id<?"
+	q := "SELECT r.id,r.owner,r.json,coalesce(t.inbound,0),coalesce(t.outbound,0),g.default_network,g.ingress," + ownerName + "," + ruleServiceBlockSQL +
+		" FROM rules r JOIN users u ON u.id=r.owner JOIN groups g ON g.id=r.entry LEFT JOIN traffic t ON r.id=t.rule_id" + where + " AND r.id<?"
 	args = append(args, cursor)
 	order := "r.id DESC"
 	query := r.URL.Query()
@@ -523,7 +591,7 @@ func (s *Server) listRules(w http.ResponseWriter, r *http.Request, u User) {
 		var raw, ingress string
 		var group wire.DeviceGroup
 		var id, owner int64
-		if e = rows.Scan(&id, &owner, &raw, &row.In, &row.Out, &group.DefaultNetwork, &ingress, &row.OwnerName); e == nil {
+		if e = rows.Scan(&id, &owner, &raw, &row.In, &row.Out, &group.DefaultNetwork, &ingress, &row.OwnerName, &row.ServiceBlock); e == nil {
 			e = json.Unmarshal([]byte(raw), &row.Rule)
 		}
 		if e == nil {
@@ -534,6 +602,9 @@ func (s *Server) listRules(w http.ResponseWriter, r *http.Request, u User) {
 			return
 		}
 		row.ID, row.Owner = id, owner
+		if row.RouteRepair != nil && row.RouteRepair.Entry {
+			row.Port = 0
+		}
 		row.EffectiveNetwork = group.RuleNetwork(row.Rule)
 		if group.Ingress.BlocksUDP() && row.EffectiveNetwork == "both" {
 			row.EffectiveNetwork = "tcp"
@@ -761,6 +832,9 @@ func validRule(tx *sql.Tx, u User, rule *wire.Rule) error {
 
 func storeRule(tx *sql.Tx, u User, rule *wire.Rule) error {
 	if rule.ID == 0 {
+		if rule.RouteRepair != nil {
+			return errors.New(ruleRouteRepairMessage)
+		}
 		if rule.Owner == 0 || !u.Admin {
 			rule.Owner = u.ID
 		}
@@ -774,19 +848,25 @@ func storeRule(tx *sql.Tx, u User, rule *wire.Rule) error {
 		if err := json.Unmarshal([]byte(previous), &old); err != nil {
 			return err
 		}
-		if old.Enabled && rule.Enabled && old.UsesHAProxy() != rule.UsesHAProxy() {
+		if old.RouteRepair == nil && old.Enabled && rule.Enabled && old.UsesHAProxy() != rule.UsesHAProxy() {
 			return errors.New("请先暂停规则，等入口节点释放监听端口后再切换转发方式")
+		}
+		if missing := old.RouteRepair; missing != nil && !rule.ConfirmRoute &&
+			((missing.Path && len(rule.Path) == 0 && !rule.TLSShared) || (missing.BackupPath && len(rule.BackupPath) == 0)) {
+			return errors.New("请重新选择出口，或确认按当前线路转发")
 		}
 		rule.Owner = owner
 	}
-	owner, e := readUser(tx.QueryRow(userSelect+" WHERE id=?", rule.Owner))
+	var owner User
+	var serviceBlock string
+	e := scanUser(tx.QueryRow("SELECT "+userColumns+","+ruleServiceBlockSQL+" FROM users u WHERE id=?", rule.Owner), &owner, &serviceBlock)
 	if e != nil {
 		return errors.New("用户不存在")
 	}
-	if !owner.Admin && (owner.Banned || owner.Expires <= time.Now().Unix() || (owner.Quota > 0 && owner.Used >= owner.Quota)) {
-		return errors.New("该用户套餐不可用")
+	if owner.Banned || rule.ID == 0 && serviceBlock != "" {
+		return errors.New(serviceBlock)
 	}
-	if rule.ID == 0 && !owner.Admin && (owner.MaxRules > 0 || owner.PlanID == 0) {
+	if rule.ID == 0 && owner.MaxRules > 0 {
 		var count int
 		if e = tx.QueryRow("SELECT count(*) FROM rules WHERE owner=?", owner.ID).Scan(&count); e != nil {
 			return e
@@ -833,6 +913,7 @@ func storeRule(tx *sql.Tx, u User, rule *wire.Rule) error {
 			return errors.New("规则所属账号设有限额，请选择内置转发")
 		}
 	}
+	rule.RouteRepair, rule.ConfirmRoute = nil, false
 	raw, e := json.Marshal(rule)
 	if e != nil {
 		return e
@@ -882,7 +963,7 @@ func (s *Server) checkGroupCapacity(tx *sql.Tx, group int64) error {
 			ELSE json_extract(r.json,'$.protocol') END AS network,
 			coalesce(json_extract(g.ingress,'$.disableUDP'),0)=1 OR coalesce(json_array_length(g.ingress,'$.allowedHosts'),0)>0 AS no_udp
 		FROM rules r JOIN groups g ON g.id=r.entry
-		WHERE r.entry=? AND json_extract(r.json,'$.enabled')=1 AND coalesce(json_extract(r.json,'$.tlsSharedPort'),0)=0
+		WHERE r.entry=? AND json_extract(r.json,'$.enabled')=1 AND `+ruleRouteReadySQL+` AND coalesce(json_extract(r.json,'$.tlsSharedPort'),0)=0
 		) SELECT coalesce(sum(network<>'udp'),0),coalesce(sum(NOT no_udp AND network IN ('udp','both')),0)
 		FROM per_rule`, group).Scan(&tcp, &udp)
 	if err != nil {
@@ -918,7 +999,25 @@ func (s *Server) saveRule(w http.ResponseWriter, r *http.Request, u User) {
 		return
 	}
 	rule.ID = pathID(r)
-	tx, e := s.db.Begin()
+	var checked wire.PortCheck
+	if rule.ID == 0 && rule.Enabled && rule.TLSSharedPort == 0 && s.hasPortCheckNode(rule.Entry) {
+		var group wire.DeviceGroup
+		status, err := s.previewRule(r, u, &rule, &group)
+		if err == nil {
+			checked = forwardingPortCheck(rule, group)
+			status, err = s.checkNewRulePort(r.Context(), checked, group, u)
+		}
+		if err != nil {
+			if status == http.StatusInternalServerError {
+				dbFailure(w, err)
+			} else {
+				fail(w, status, err.Error())
+			}
+			return
+		}
+		rule.ID = 0
+	}
+	tx, e := s.db.BeginTx(r.Context(), nil)
 	if e != nil {
 		dbFailure(w, e)
 		return
@@ -927,6 +1026,17 @@ func (s *Server) saveRule(w http.ResponseWriter, r *http.Request, u User) {
 	if e = storeRule(tx, u, &rule); e != nil {
 		fail(w, 400, e.Error())
 		return
+	}
+	if checked.Port != 0 {
+		group, err := lookupGroup(tx)(rule.Entry)
+		if err != nil {
+			dbFailure(w, err)
+			return
+		}
+		if forwardingPortCheck(rule, group) != checked {
+			fail(w, 409, "入口配置已变更，请重新保存以检查端口")
+			return
+		}
 	}
 	if rule.Enabled {
 		if e = s.checkGroupCapacity(tx, rule.Entry); e != nil {
@@ -1035,7 +1145,8 @@ func (s *Server) batchRules(w http.ResponseWriter, r *http.Request, u User) {
 	} else {
 		for _, id := range input.IDs {
 			var owner, group int64
-			e = tx.QueryRow("SELECT owner,entry FROM rules WHERE id=?", id).Scan(&owner, &group)
+			var routeReady bool
+			e = tx.QueryRow("SELECT owner,entry,"+ruleRouteReadySQL+" FROM rules r WHERE id=?", id).Scan(&owner, &group, &routeReady)
 			if errors.Is(e, sql.ErrNoRows) || (e == nil && owner != u.ID && !u.Admin) {
 				fail(w, 404, "规则不存在")
 				return
@@ -1058,6 +1169,10 @@ func (s *Server) batchRules(w http.ResponseWriter, r *http.Request, u User) {
 			case "enable", "disable":
 				value := "false"
 				if input.Action == "enable" {
+					if !routeReady {
+						fail(w, 400, ruleRouteRepairMessage)
+						return
+					}
 					value = "true"
 					affected[group] = true
 				}

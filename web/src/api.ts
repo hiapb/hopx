@@ -80,10 +80,25 @@ export type User = {
   invite: string;
   autoRenew: boolean;
   note: string;
+  serviceBlock?: string;
+  service?: {
+    group: string; plan: string; renewPrice: number; rateMbps: number; maxIPs: number; maxConnections: number;
+    inviteRegistrationEnabled: boolean; referralRate: number; referralFirstOnly: boolean;
+  };
 };
 
-export function ruleLimitLabel(user: Pick<User, "admin" | "maxRules" | "planId">) {
-  return user.admin || (user.maxRules === 0 && user.planId > 0) ? "不限制" : String(user.maxRules);
+export function hasPlan(user: Pick<User, "planId" | "serviceBlock">) {
+  return user.planId > 0 && user.serviceBlock !== "请先订购套餐";
+}
+
+export function ruleLimitLabel(user: Pick<User, "maxRules" | "planId" | "serviceBlock">) {
+  if (!hasPlan(user)) return "0";
+  return user.maxRules === 0 ? "不限制" : String(user.maxRules);
+}
+
+export function planExpiryLabel(user: Pick<User, "expires" | "planId" | "serviceBlock">) {
+  if (!hasPlan(user)) return "—";
+  return user.expires >= 253402300799 ? "不限期" : date(user.expires);
 }
 
 export type Group = {
@@ -164,8 +179,11 @@ export type Node = {
 };
 export type Rule = {
   ownerName?: string;
+  serviceBlock?: string;
   runtime?: string;
   reportedAt?: number;
+  routeRepair?: { entry?: boolean; path?: boolean; backupPath?: boolean };
+  confirmRoute?: boolean;
   id: number;
   owner: number;
   name: string;

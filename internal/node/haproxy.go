@@ -26,11 +26,18 @@ type proxyRule struct {
 }
 
 type proxyProcess struct {
-	socket   string
-	command  *exec.Cmd
-	done     chan struct{}
-	counters map[int64]*counter
-	last     map[int64][2]int64
+	socket    string
+	command   *exec.Cmd
+	done      chan struct{}
+	counters  map[int64]*counter
+	last      map[int64][2]int64
+	frontends map[int64]proxyFrontend
+}
+
+type proxyFrontend struct {
+	expires int64
+	targets int
+	metered bool
 }
 
 type proxyStartupLog struct{ bytes.Buffer }
@@ -47,6 +54,16 @@ type proxyEngine struct {
 	active, draining       *proxyProcess
 	listeners, connections int
 	reserved               int
+	expiry                 *time.Timer
+	reportUntil            time.Time
+}
+
+func meteredProxy(rule wire.Forward) bool { return rule.HAProxy && rule.QuotaManaged }
+
+func (e *Engine) authorizeProxyTraffic(period time.Duration) {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	e.proxy.reportUntil = time.Now().Add(max(30*time.Second, 3*period))
 }
 
 func (p *proxyProcess) running() bool {
@@ -65,6 +82,95 @@ func (p *proxyProcess) stop() {
 	if p.running() {
 		_ = p.command.Process.Kill()
 		<-p.done
+	}
+}
+
+func (p *proxyProcess) stopFrontends(shouldStop func(int64, proxyFrontend) bool) {
+	if !p.running() {
+		return
+	}
+	var commands strings.Builder
+	for id, frontend := range p.frontends {
+		if !shouldStop(id, frontend) {
+			continue
+		}
+		if commands.Len() >= 4000 {
+			if !p.runCommands(commands.String()) {
+				p.stop()
+				return
+			}
+			commands.Reset()
+		}
+		fmt.Fprintf(&commands, "disable frontend hopx_%d;", id)
+		for i := 1; i <= frontend.targets; i++ {
+			fmt.Fprintf(&commands, "shutdown sessions server hopx_%d/target_%d;", id, i)
+		}
+		delete(p.frontends, id)
+	}
+	if commands.Len() != 0 && !p.runCommands(commands.String()) {
+		p.stop()
+	}
+}
+
+func (p *proxyProcess) runCommands(commands string) bool {
+	conn, err := net.DialTimeout("unix", p.socket, 250*time.Millisecond)
+	if err != nil {
+		return false
+	}
+	defer conn.Close()
+	_ = conn.SetDeadline(time.Now().Add(time.Second))
+	if _, err = io.WriteString(conn, commands+"\n"); err != nil {
+		return false
+	}
+	result, err := io.ReadAll(io.LimitReader(conn, 4096))
+	return err == nil && len(bytes.TrimSpace(result)) == 0
+}
+
+// One timer per node covers the active and draining HAProxy processes.
+func (e *Engine) scheduleProxyExpiry() {
+	if e.proxy.expiry != nil {
+		e.proxy.expiry.Stop()
+		e.proxy.expiry = nil
+	}
+	var earliest time.Time
+	reportUntil := e.proxy.reportUntil
+	if reportUntil.IsZero() {
+		reportUntil = time.Now()
+	}
+	for _, process := range []*proxyProcess{e.proxy.active, e.proxy.draining} {
+		if !process.running() {
+			continue
+		}
+		for _, frontend := range process.frontends {
+			if frontend.expires > 0 {
+				deadline := time.Unix(frontend.expires, 0)
+				if earliest.IsZero() || deadline.Before(earliest) {
+					earliest = deadline
+				}
+			}
+			if frontend.metered && (earliest.IsZero() || reportUntil.Before(earliest)) {
+				earliest = reportUntil
+			}
+		}
+	}
+	if !earliest.IsZero() {
+		e.proxy.expiry = time.AfterFunc(time.Until(earliest), func() {
+			e.mu.Lock()
+			defer e.mu.Unlock()
+			now := time.Now()
+			for _, process := range []*proxyProcess{e.proxy.active, e.proxy.draining} {
+				process.stopFrontends(func(_ int64, frontend proxyFrontend) bool {
+					if frontend.metered && !now.Before(e.proxy.reportUntil) {
+						if process == e.proxy.active {
+							e.applied = ""
+						}
+						return true
+					}
+					return frontend.expires > 0 && frontend.expires <= now.Unix()
+				})
+			}
+			e.scheduleProxyExpiry()
+		})
 	}
 }
 
@@ -150,6 +256,12 @@ func proxyConfig(rules []proxyRule, hosts []string, maxConnections int) (string,
 	fmt.Fprintf(&config, "    nbthread 1\n    maxconn %d\n    hard-stop-after 15s\n\nresolvers hopx_dns\n    parse-resolv-conf\n\ndefaults\n    mode tcp\n    timeout connect 5s\n    timeout client 5m\n    timeout server 5m\n    option redispatch\n    retries 2\n", maxConnections)
 	for _, rule := range rules {
 		fmt.Fprintf(&config, "\nlisten hopx_%d\n", rule.ID)
+		if rule.HAProxyRatio > 0 {
+			fmt.Fprintf(&config, "    # traffic quota epoch %d\n", rule.QuotaEpoch)
+		}
+		if rule.Expires > 0 {
+			fmt.Fprintf(&config, "    tcp-request connection reject if { date ge %d }\n", rule.Expires)
+		}
 		for _, host := range hosts {
 			if host == "" {
 				fmt.Fprintf(&config, "    bind [::]:%d v4v6\n", rule.Port)
@@ -193,7 +305,7 @@ func (e *Engine) stageProxy(ctx context.Context, rules []proxyRule) (*proxyProce
 	if err != nil {
 		return nil, config, err
 	}
-	if e.proxy.active.running() && config == e.proxy.config {
+	if e.proxy.active.running() && config == e.proxy.config && len(e.proxy.active.frontends) == len(rules) {
 		return e.proxy.active, config, nil
 	}
 	if e.proxy.draining.running() && (config != "" || e.proxy.active.running()) {
@@ -227,9 +339,11 @@ func (e *Engine) stageProxy(ctx context.Context, rules []proxyRule) (*proxyProce
 		_ = os.RemoveAll(dir)
 		return nil, "", err
 	}
-	p := &proxyProcess{socket: socket, command: command, done: make(chan struct{}), counters: make(map[int64]*counter), last: make(map[int64][2]int64)}
+	p := &proxyProcess{socket: socket, command: command, done: make(chan struct{}), counters: make(map[int64]*counter),
+		last: make(map[int64][2]int64), frontends: make(map[int64]proxyFrontend, len(rules))}
 	for _, rule := range rules {
 		p.counters[rule.ID] = rule.stats
+		p.frontends[rule.ID] = proxyFrontend{expires: rule.Expires, targets: len(rule.Targets), metered: meteredProxy(rule.Forward)}
 	}
 	go func() {
 		_ = command.Wait()
@@ -257,6 +371,13 @@ func (e *Engine) stageProxy(ctx context.Context, rules []proxyRule) (*proxyProce
 
 func (e *Engine) commitProxy(next *proxyProcess, config string, rules []proxyRule) {
 	if next != e.proxy.active {
+		keep := make(map[int64]bool, len(rules))
+		for _, rule := range rules {
+			keep[rule.ID] = true
+		}
+		for _, old := range []*proxyProcess{e.proxy.active, e.proxy.draining} {
+			old.stopFrontends(func(id int64, _ proxyFrontend) bool { return !keep[id] })
+		}
 		if current := e.proxy.active; current.running() {
 			_, _ = current.sample()
 			_ = current.command.Process.Signal(syscall.SIGUSR1)
@@ -267,10 +388,12 @@ func (e *Engine) commitProxy(next *proxyProcess, config string, rules []proxyRul
 	if next != nil {
 		for _, rule := range rules {
 			next.counters[rule.ID] = rule.stats
+			next.frontends[rule.ID] = proxyFrontend{expires: rule.Expires, targets: len(rule.Targets), metered: meteredProxy(rule.Forward)}
 		}
 	}
 	e.proxy.config = config
 	e.proxy.listeners = len(rules) * len(e.bind)
+	e.scheduleProxyExpiry()
 }
 
 func (e *Engine) reserveProxySessions() error {

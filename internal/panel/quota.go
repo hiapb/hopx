@@ -24,7 +24,7 @@ func (s *Server) allocateNodeQuota(node, group int64, generation string, rules [
 	eligible := make(map[int64]int64)
 	paired := make(map[int64]bool)
 	for _, rule := range rules {
-		if rule.QuotaManaged {
+		if rule.QuotaManaged && (!rule.HAProxy || rule.Protocol != "tcp") {
 			eligible[rule.Owner] = rule.QuotaEpoch
 			paired[rule.Owner] = paired[rule.Owner] || metered && rule.EntryRatio > 0 &&
 				(rule.ExitMeter != "" && rule.Ratio > rule.EntryRatio ||
@@ -118,12 +118,16 @@ func nextGrant(tx *sql.Tx, node, owner, epoch int64, generation string, now, win
 		return wire.QuotaGrant{}, nil
 	}
 	var quota, used, remainder, expires int64
-	e = tx.QueryRow("SELECT quota,used,billing_remainder,expires FROM users WHERE id=? AND quota_epoch=? AND banned=0", owner, epoch).Scan(&quota, &used, &remainder, &expires)
-	if e == sql.ErrNoRows || expires <= now || quota <= 0 || used >= quota {
+	e = tx.QueryRow("SELECT quota,used,billing_remainder,expires FROM users u WHERE id=? AND quota_epoch=? AND "+
+		ruleServiceActiveSQL, owner, epoch).Scan(&quota, &used, &remainder, &expires)
+	if e == sql.ErrNoRows {
 		return wire.QuotaGrant{}, nil
 	}
 	if e != nil {
 		return grant, e
+	}
+	if quota <= 0 || expires <= now {
+		return wire.QuotaGrant{}, nil
 	}
 	if grant.ID != "" && grant.Allocated-spent >= window*2/3 {
 		if grant.Expires-now < 30 {

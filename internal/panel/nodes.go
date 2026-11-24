@@ -670,8 +670,7 @@ func (s *Server) compileGroupWithTickets(group int64, previous, tickets map[wire
 	rows, e := s.db.Query(`SELECT r.id,r.json,u.id,u.admin,u.group_id,g.ratio,u.expires,u.quota_epoch,u.quota,
 		coalesce(u.rate_override,p.rate_mbps,0),coalesce(u.ips_override,p.max_ips,0),coalesce(u.connections_override,p.max_connections,0)
 		FROM rules r JOIN users u ON u.id=r.owner JOIN groups g ON g.id=r.entry LEFT JOIN plans p ON p.id=u.plan_id
-		WHERE r.entry=? AND json_extract(r.json,'$.enabled')=1 AND u.banned=0
-		AND (u.admin=1 OR (u.expires>unixepoch() AND (u.quota=0 OR u.used<u.quota))) ORDER BY r.id`, group)
+		WHERE r.entry=? AND json_extract(r.json,'$.enabled')=1 AND `+ruleServiceActiveSQL+` AND `+ruleRouteReadySQL+` ORDER BY r.id`, group)
 	if e != nil {
 		return wire.Config{}, e
 	}
@@ -681,6 +680,7 @@ func (s *Server) compileGroupWithTickets(group int64, previous, tickets map[wire
 		primary, backup []int64
 	}
 	var routed []rulePaths
+	var adminTLSChildren map[int64]bool
 	for rows.Next() {
 		var f wire.Forward
 		var raw string
@@ -695,10 +695,6 @@ func (s *Server) compileGroupWithTickets(group int64, previous, tickets map[wire
 		f.ID, f.Owner = id, u.ID
 		f.Label = ""
 		f.ProbeInterval = 0 // Sampling cadence is managed by the panel.
-		if u.Admin {
-			f.Expires = 0
-		}
-
 		if !canUse(u, entry) || !entry.AllowsIngress(f.Rule) || !entry.AllowsIngressPath(f.Rule) {
 			continue
 		}
@@ -745,7 +741,7 @@ func (s *Server) compileGroupWithTickets(group int64, previous, tickets map[wire
 				virtualGroup = selected[0]
 			}
 			identity := wire.ExitMeter{VirtualGroup: virtualGroup, Rule: f.ID, Owner: f.Owner, Group: path[len(path)-1], Epoch: f.QuotaEpoch,
-				Ratio: ratio, Managed: !u.Admin && u.Quota > 0 && ratio > 0}
+				Ratio: ratio, Managed: u.Quota > 0 && ratio > 0}
 			ticket := previous[identity]
 			if ticket == "" {
 				ticket = identity.Sign(s.meterKey)
@@ -767,10 +763,16 @@ func (s *Server) compileGroupWithTickets(group int64, previous, tickets map[wire
 			backupRatio += entryRatio
 			f.BackupRatio = &backupRatio
 		}
-		f.QuotaManaged = !u.Admin && u.Quota > 0 && (f.Ratio > 0 || (f.BackupRatio != nil && *f.BackupRatio > 0))
+		f.QuotaManaged = u.Quota > 0 && (f.Ratio > 0 || (f.BackupRatio != nil && *f.BackupRatio > 0))
 		f.MaxFailures, f.RecoverySeconds = entry.Routing.MaxFailures, entry.Routing.RecoverySeconds
 		if len(primary) != 0 || len(backup) != 0 {
 			routed = append(routed, rulePaths{len(config.Rules), primary, backup})
+		}
+		if u.Admin && f.TLSSharedPort != 0 {
+			if adminTLSChildren == nil {
+				adminTLSChildren = make(map[int64]bool)
+			}
+			adminTLSChildren[id] = true
 		}
 		config.Rules = append(config.Rules, f)
 	}
@@ -819,7 +821,7 @@ func (s *Server) compileGroupWithTickets(group int64, previous, tickets map[wire
 			return false
 		}
 		parent, exists := parents[f.TLSSharedPort]
-		return !exists || !authorizeTLSNames(parent, f.Rule, f.Expires == 0)
+		return !exists || !authorizeTLSNames(parent, f.Rule, adminTLSChildren[f.ID])
 	})
 	return withConfigRevision(config)
 }
@@ -920,7 +922,14 @@ func (s *Server) accountTraffic(node, group int64, report *wire.Report) (string,
 		add(byOwner, owner, t)
 		add(byGroup, group, t)
 		if !t.QuotaManaged && t.Ratio > 0 {
-			if e = debitTraffic(tx, owner, t.In+t.Out, t.Ratio, -1); e != nil {
+			epoch := int64(-1)
+			if t.QuotaEpoch != nil {
+				epoch = *t.QuotaEpoch
+				if epoch < 0 {
+					return "", fmt.Errorf("流量计费周期无效")
+				}
+			}
+			if e = debitTraffic(tx, owner, t.In+t.Out, t.Ratio, epoch); e != nil {
 				return "", e
 			}
 		}

@@ -10,8 +10,10 @@ CREATE TABLE IF NOT EXISTS users (
  expires INTEGER NOT NULL DEFAULT 0, max_rules INTEGER NOT NULL DEFAULT 0, plan_id INTEGER NOT NULL DEFAULT 0,
  rate_override INTEGER, ips_override INTEGER, connections_override INTEGER,
  invite TEXT NOT NULL UNIQUE, inviter INTEGER REFERENCES users(id), auto_renew INTEGER NOT NULL DEFAULT 0,
+ auto_renew_configured INTEGER NOT NULL DEFAULT 0,
  note TEXT NOT NULL DEFAULT '', created INTEGER NOT NULL DEFAULT (unixepoch())
 );
+CREATE INDEX IF NOT EXISTS users_auto_renew ON users(id) WHERE auto_renew=1 AND banned=0 AND plan_id>0;
 CREATE TABLE IF NOT EXISTS sessions (token TEXT PRIMARY KEY, user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE, expires INTEGER NOT NULL);
 CREATE TABLE IF NOT EXISTS user_referral_settings (
  user_id INTEGER PRIMARY KEY REFERENCES users(id) ON DELETE CASCADE,

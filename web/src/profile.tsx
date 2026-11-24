@@ -1,14 +1,10 @@
 import { useState } from "react";
 import { Alert, App, Button, Descriptions, Form, Input, InputNumber, Progress, Space, Switch, Typography } from "antd";
-import { api, bytes, currency, date, ruleLimitLabel, useData } from "./api";
+import { api, bytes, currency, date, hasPlan, planExpiryLabel, ruleLimitLabel, useData } from "./api";
 import type { Site, User } from "./api";
 import RefreshButton from "./refresh-button";
 import { useConfirmAction } from "./confirm-action";
 
-type Service = {
-  group: string; plan: string; renewPrice: number; rateMbps: number; maxIPs: number; maxConnections: number;
-  inviteRegistrationEnabled: boolean; referralRate: number; referralFirstOnly: boolean;
-};
 type Renewal = { planId: number; name: string; kind: string; price: number; expires: number; nextExpires: number; quota: number; balance: number; epoch: number };
 
 export default function Profile({ user, site, refresh }: { user: User; site: Site; refresh: () => Promise<void> }) {
@@ -20,8 +16,8 @@ export default function Profile({ user, site, refresh }: { user: User; site: Sit
   const [password] = Form.useForm();
   const [telegramLink, setTelegramLink] = useState("");
   const telegram = useData<{ available: boolean; linked: boolean; enabled: boolean; income: boolean; updown: boolean }>("/telegram", { available: false, linked: false, enabled: false, income: false, updown: false });
-  const service = useData<Service | null>("/me/service", null);
-  const plan = service.value;
+  const plan = user.service;
+  const subscribed = hasPlan(user);
   const inviteLink = location.origin + location.pathname + "#/register/" + encodeURIComponent(user.invite);
 
   async function previewRenewal() {
@@ -80,7 +76,7 @@ export default function Profile({ user, site, refresh }: { user: User; site: Sit
     setWorking(true);
     try {
       await api(path, method, values);
-      await Promise.all([refresh(), telegram.reload(), service.reload()]);
+      await (path === "/telegram" ? telegram.reload() : refresh());
       message.success("已保存");
       return true;
     } catch (error) {
@@ -113,25 +109,26 @@ export default function Profile({ user, site, refresh }: { user: User; site: Sit
           {(user.admin || site.showShop !== "false") && <Button type="primary" href="#/shop">充值</Button>}
         </Space>
       </header>
-      {service.error && <Alert type="error" showIcon className="alert-gap" message={service.error} />}
       <div className="profile-grid">
         <section className="profile-section" aria-labelledby="profile-service">
           <h2 id="profile-service">套餐与流量</h2>
+          {user.serviceBlock && <Alert className="alert-gap" type="info" showIcon message={user.serviceBlock} />}
           <div className="profile-usage">
-            <div><span>已用流量</span><strong>{bytes(user.used)} / {user.quota ? bytes(user.quota) : "无限"}</strong></div>
-            {user.quota > 0 && <Progress percent={Math.min(100, Math.round(user.used / user.quota * 100))} />}
+            <div><span>已用流量</span><strong>{bytes(user.used)} / {subscribed && user.quota === 0 ? "无限" : bytes(subscribed ? user.quota : 0)}</strong></div>
+            {subscribed && user.quota > 0 && <Progress percent={Math.min(100, Math.round(user.used / user.quota * 100))} />}
           </div>
           <Descriptions size="small" layout="vertical" column={{ xs: 2, sm: 3 }} colon={false} items={[
-            { key: "plan", label: "当前套餐", children: plan?.plan || (user.planId ? "#" + user.planId : "未订购套餐") },
-            { key: "expires", label: "到期时间", children: user.admin ? "不限期" : date(user.expires) },
+            { key: "plan", label: "当前套餐", children: subscribed ? plan?.plan || "#" + user.planId : "未订购套餐" },
+            { key: "expires", label: "到期时间", children: planExpiryLabel(user) },
             { key: "limit", label: "规则上限", children: ruleLimitLabel(user) },
             ...(plan?.group ? [{ key: "group", label: "用户组", children: plan.group }] : []),
             ...(plan?.rateMbps ? [{ key: "rate", label: "用户限速", children: plan.rateMbps + " Mbps" }] : []),
             ...(plan?.maxIPs ? [{ key: "ips", label: "IP 数量上限", children: plan.maxIPs }] : []),
             ...(plan?.maxConnections ? [{ key: "connections", label: "连接数上限", children: plan.maxConnections }] : []),
-            ...(user.planId > 0 && plan?.plan ? [{ key: "renewPrice", label: "续费价格", children: currency(plan.renewPrice) }] : []),
+            ...(subscribed && plan?.plan ? [{ key: "renewPrice", label: "续费价格", children: currency(plan.renewPrice) }] : []),
           ]} />
-          {user.planId > 0 && <Button className="profile-commission" loading={quoting} onClick={() => void previewRenewal()}>立即续费</Button>}
+          {subscribed ? <Button className="profile-commission" loading={quoting} onClick={() => void previewRenewal()}>立即续费</Button>
+            : (user.admin || site.showShop !== "false") && <Button className="profile-commission" href="#/shop">选购套餐</Button>}
         </section>
 
         <section className="profile-section" aria-labelledby="profile-wallet">
@@ -159,7 +156,7 @@ export default function Profile({ user, site, refresh }: { user: User; site: Sit
           <h2 id="profile-security">账户设置</h2>
           <div className="profile-setting">
             <div><strong>自动续费</strong><p className="muted">套餐到期或流量用完时，从钱包扣款续费。</p></div>
-            <Switch checked={user.autoRenew} disabled={working} aria-label="自动续费" onChange={(autoRenew) => void action("/me", "PATCH", { autoRenew })} />
+            <Switch checked={subscribed && user.autoRenew} disabled={working || !subscribed} aria-label="自动续费" onChange={(autoRenew) => void action("/me", "PATCH", { autoRenew })} />
           </div>
           <Form name="change-password" form={password} layout="vertical" className="profile-form" onFinish={confirmPassword}>
             <h3>修改密码</h3>

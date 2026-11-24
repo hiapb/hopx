@@ -47,6 +47,12 @@ func (s *Server) pushPlan(w http.ResponseWriter, r *http.Request, _ User) {
 		dbFailure(w, err)
 		return
 	}
+	if input.Group {
+		if err = clearUnauthorizedRuleRoutes(tx, plan.GroupID, "u.plan_id=? AND u.admin=0 AND u.group_id<>?", plan.ID, plan.GroupID); err != nil {
+			dbFailure(w, err)
+			return
+		}
+	}
 	result, err := tx.Exec(`UPDATE users SET quota=CASE WHEN ? THEN ? ELSE quota END,
 		quota_epoch=quota_epoch+CASE WHEN ? THEN 1 ELSE 0 END,
 		max_rules=CASE WHEN ? THEN ? ELSE max_rules END, group_id=CASE WHEN ? THEN ? ELSE group_id END,

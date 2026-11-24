@@ -27,16 +27,39 @@ import (
 )
 
 type counter struct {
-	in  atomic.Int64
-	out atomic.Int64
+	in, out atomic.Int64
+	// A negative value means the counter was collected and retired.
+	writers atomic.Int64
 }
 
 type countKey struct {
-	id, ratio    int64
-	quotaManaged bool
+	id, ratio, epoch int64
+	quotaManaged     bool
+}
+
+func (c *counter) retain() bool {
+	for {
+		writers := c.writers.Load()
+		if writers < 0 {
+			return false
+		}
+		if c.writers.CompareAndSwap(writers, writers+1) {
+			return true
+		}
+	}
+}
+
+func billingCounterKey(f wire.Forward, ratio int64, managed bool) countKey {
+	epoch := int64(-1)
+	if !managed && ratio > 0 {
+		epoch = f.QuotaEpoch
+	}
+	return countKey{id: f.ID, ratio: ratio, epoch: epoch, quotaManaged: managed}
 }
 
 type ruleRuntime struct {
+	lifetime         context.Context
+	cancelLifetime   context.CancelFunc
 	quota            *quotaBook
 	rule             wire.Forward
 	cert             *tls.Config
@@ -390,11 +413,68 @@ func ensureCounter(old, pending map[countKey]*counter, key countKey) *counter {
 	return pending[key]
 }
 
+// Apply removals before staging listeners so an unrelated bind or reload
+// failure cannot keep a revoked forward or its established sessions alive.
+func (e *Engine) revokeMissingRules(rules []wire.Forward) bool {
+	if len(e.activeRules) == 0 {
+		return false
+	}
+	enabled := make(map[int64]bool, len(rules))
+	for _, rule := range rules {
+		if rule.Enabled {
+			enabled[rule.ID] = true
+		}
+	}
+	removed := false
+	for id, active := range e.activeRules {
+		if enabled[id] {
+			continue
+		}
+		active.cancelLifetime()
+		delete(e.activeRules, id)
+		removed = true
+	}
+	if !removed {
+		return false
+	}
+	for key, listener := range e.listeners {
+		if !enabled[listener.route.Load().rule.ID] {
+			listener.close()
+			delete(e.listeners, key)
+		}
+	}
+	for _, proxy := range []*proxyProcess{e.proxy.active, e.proxy.draining} {
+		proxy.stopFrontends(func(id int64, _ proxyFrontend) bool { return !enabled[id] })
+	}
+	if e.proxy.active.running() {
+		e.proxy.listeners = len(e.proxy.active.frontends) * len(e.bind)
+	} else {
+		e.proxy.listeners = 0
+	}
+	e.scheduleProxyExpiry()
+	activeRules := make([]wire.Forward, 0, len(e.activeRules))
+	for _, active := range e.activeRules {
+		activeRules = append(activeRules, active.rule)
+	}
+	e.quota.updateRules(activeRules)
+	e.applied = ""
+	return true
+}
+
 func (e *Engine) Apply(ctx context.Context, c wire.Config, save func() error) error {
+	return e.apply(ctx, c, save, nil)
+}
+
+func (e *Engine) apply(ctx context.Context, c wire.Config, save, invalidateCache func() error) error {
 	e.mu.Lock()
 	defer e.mu.Unlock()
 	if c.Revision == e.applied {
 		return nil
+	}
+	if e.revokeMissingRules(c.Rules) && invalidateCache != nil {
+		if err := invalidateCache(); err != nil {
+			return fmt.Errorf("remove revoked rules from cache: %w", err)
+		}
 	}
 	next := map[listenerKey]*ruleRuntime{}
 	proxyRules := make([]proxyRule, 0)
@@ -410,21 +490,21 @@ func (e *Engine) Apply(ctx context.Context, c wire.Config, save func() error) er
 		if f.Port < 1 || f.Port > 65535 {
 			return fmt.Errorf("rule %d has invalid port", f.ID)
 		}
-		stats := ensureCounter(e.counters, newCounters, countKey{f.ID, f.Ratio, f.QuotaManaged})
+		stats := ensureCounter(e.counters, newCounters, billingCounterKey(f, f.Ratio, f.QuotaManaged))
 		if f.HAProxy {
 			if f.Protocol != "tcp" && f.Protocol != "both" {
 				return fmt.Errorf("rule %d has invalid HAProxy network", f.ID)
 			}
-			proxyStats := ensureCounter(e.counters, newCounters, countKey{f.ID, f.HAProxyRatio, false})
+			proxyStats := ensureCounter(e.counters, newCounters, billingCounterKey(f, f.HAProxyRatio, false))
 			proxyRules = append(proxyRules, proxyRule{Forward: f, stats: proxyStats})
 		}
 		backupStats := stats
 		if f.BackupRatio != nil {
-			backupStats = ensureCounter(e.counters, newCounters, countKey{f.ID, *f.BackupRatio, f.QuotaManaged})
+			backupStats = ensureCounter(e.counters, newCounters, billingCounterKey(f, *f.BackupRatio, f.QuotaManaged))
 		}
 		splitStats := stats
 		if f.ExitMeter != "" || f.BackupExitMeter != "" {
-			splitStats = ensureCounter(e.counters, newCounters, countKey{f.ID, f.EntryRatio, f.QuotaManaged})
+			splitStats = ensureCounter(e.counters, newCounters, billingCounterKey(f, f.EntryRatio, f.QuotaManaged))
 		}
 		rule := e.ruleAdmission[f.ID]
 		if rule == nil || rule.rate != f.RateMbps {
@@ -548,6 +628,24 @@ func (e *Engine) Apply(ctx context.Context, c wire.Config, save func() error) er
 			return err
 		}
 	}
+	for id, candidate := range candidates {
+		old := e.activeRules[id]
+		if candidate == old {
+			continue
+		}
+		if old != nil && old.rule.Expires == candidate.rule.Expires && old.rule.QuotaEpoch == candidate.rule.QuotaEpoch {
+			candidate.lifetime, candidate.cancelLifetime = old.lifetime, old.cancelLifetime
+		} else if expires := candidate.rule.Expires; expires > 0 {
+			candidate.lifetime, candidate.cancelLifetime = context.WithDeadline(ctx, time.Unix(expires, 0))
+		} else {
+			candidate.lifetime, candidate.cancelLifetime = context.WithCancel(ctx)
+		}
+	}
+	for id, old := range e.activeRules {
+		if candidate := candidates[id]; candidate == nil || candidate.lifetime != old.lifetime {
+			old.cancelLifetime()
+		}
+	}
 	e.commitProxy(staged, proxyConfig, proxyRules)
 	for key, l := range e.listeners {
 		if rr := next[key]; rr != nil {
@@ -592,6 +690,9 @@ func (e *Engine) Status() (string, int, int) {
 func (e *Engine) Close() {
 	e.mu.Lock()
 	defer e.mu.Unlock()
+	for _, rr := range e.activeRules {
+		rr.cancelLifetime()
+	}
 	for _, l := range e.listeners {
 		l.close()
 	}
@@ -602,6 +703,7 @@ func (e *Engine) Close() {
 			process.stop()
 		}
 	}
+	e.scheduleProxyExpiry()
 	e.releaseProxySessions()
 }
 
@@ -616,10 +718,22 @@ func (e *Engine) Traffic() []wire.Traffic {
 		}
 	}
 	values := []wire.Traffic{}
+	activeProxy, drainingProxy := e.proxy.active.running(), e.proxy.draining.running()
 	for k, v := range e.counters {
+		active := e.activeRules[k.id]
+		if (active == nil || (active.accounting != v && active.backupAccounting != v && active.splitAccounting != v)) &&
+			(!activeProxy || e.proxy.active.counters[k.id] != v) &&
+			(!drainingProxy || e.proxy.draining.counters[k.id] != v) &&
+			v.writers.CompareAndSwap(0, -1) {
+			delete(e.counters, k)
+		}
 		in, out := v.in.Swap(0), v.out.Swap(0)
 		if in != 0 || out != 0 {
-			values = append(values, wire.Traffic{RuleID: k.id, In: in, Out: out, Ratio: k.ratio, QuotaManaged: k.quotaManaged})
+			row := wire.Traffic{RuleID: k.id, In: in, Out: out, Ratio: k.ratio, QuotaManaged: k.quotaManaged}
+			if k.epoch >= 0 {
+				row.QuotaEpoch = new(k.epoch)
+			}
+			values = append(values, row)
 		}
 	}
 	return e.collectExitTraffic(values)
@@ -641,7 +755,11 @@ func (e *Engine) restore(values []wire.Traffic) {
 			stats.out.Add(v.Out)
 			continue
 		}
-		k := countKey{v.RuleID, v.Ratio, v.QuotaManaged}
+		epoch := int64(-1)
+		if v.QuotaEpoch != nil {
+			epoch = *v.QuotaEpoch
+		}
+		k := countKey{id: v.RuleID, ratio: v.Ratio, epoch: epoch, quotaManaged: v.QuotaManaged}
 		if e.counters[k] == nil {
 			e.counters[k] = &counter{}
 		}
@@ -868,6 +986,13 @@ func proxyOutput(dst net.Conn, source, destination net.Addr, version int) error 
 
 func (rr *ruleRuntime) serveTCP(ctx context.Context, client net.Conn) {
 	defer client.Close()
+	if rr.lifetime != nil {
+		ctx = rr.lifetime
+	}
+	if ctx.Err() != nil {
+		return
+	}
+	entryContext := ctx
 	originalClient := client
 	stop := context.AfterFunc(ctx, func() { originalClient.Close() })
 	defer stop()
@@ -906,6 +1031,11 @@ func (rr *ruleRuntime) serveTCP(ctx context.Context, client net.Conn) {
 				return
 			}
 			defer rr.leave(ip)
+			if rr.lifetime != nil {
+				ctx = rr.lifetime
+				stopChild := context.AfterFunc(ctx, func() { originalClient.Close() })
+				defer stopChild()
+			}
 		}
 	}
 	client, err := inspectIngress(client, rr.rule.Ingress, serverName, terminatedTLS)
@@ -920,6 +1050,10 @@ func (rr *ruleRuntime) serveTCP(ctx context.Context, client net.Conn) {
 	rawTarget := target
 	stopTarget := context.AfterFunc(ctx, func() { rawTarget.Close() })
 	defer stopTarget()
+	if entryContext != ctx {
+		stopEntry := context.AfterFunc(entryContext, func() { rawTarget.Close() })
+		defer stopEntry()
+	}
 	if rr.rule.ProxyOut && proxyOutput(target, source, destination, rr.rule.ProxyOutVersion) != nil {
 		return
 	}
@@ -940,6 +1074,10 @@ func (rr *ruleRuntime) serveTCP(ctx context.Context, client net.Conn) {
 	}
 	rr.recordRoute(&rr.lastTCPRoute, backup)
 	billing, counts := rr.billing(backup, metered)
+	if !counts.retain() {
+		return
+	}
+	defer counts.writers.Add(-1)
 	done := make(chan struct{}, 1)
 	go func() { rr.copy(ctx, target, client, billing, &counts.in); done <- struct{}{} }()
 	response, e := filterResponse(target, ip, rr.rule.ResponseFilters, sharedFilters)

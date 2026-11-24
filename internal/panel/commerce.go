@@ -129,20 +129,30 @@ func planTerms(p Plan, existing, expires, oldQuota, oldUsed, now int64, renewing
 }
 
 func purchase(tx *sql.Tx, id int64, p Plan, price int64, kind string) error {
-	var existing, expires, oldQuota, oldUsed int64
-	if e := tx.QueryRow("SELECT plan_id,expires,quota,used FROM users WHERE id=? AND banned=0", id).Scan(&existing, &expires, &oldQuota, &oldUsed); e != nil {
+	var existing, expires, oldQuota, oldUsed, oldGroup int64
+	var admin bool
+	if e := tx.QueryRow("SELECT plan_id,expires,quota,used,group_id,admin FROM users WHERE id=? AND banned=0", id).
+		Scan(&existing, &expires, &oldQuota, &oldUsed, &oldGroup, &admin); e != nil {
 		return e
 	}
 	next, quota, e := planTerms(p, existing, expires, oldQuota, oldUsed, time.Now().Unix(), kind == "renew")
 	if e != nil {
 		return e
 	}
-	result, e := tx.Exec("UPDATE users SET balance=balance-?,plan_id=?,expires=?,quota=?,used=0,billing_remainder=0,quota_epoch=quota_epoch+1,max_rules=?,group_id=? WHERE id=? AND balance>=?", price, p.ID, next, quota, p.Rules, p.GroupID, id, price)
+	result, e := tx.Exec(`UPDATE users SET balance=balance-?,plan_id=?,expires=?,quota=?,used=0,billing_remainder=0,
+		quota_epoch=quota_epoch+1,max_rules=?,group_id=?,
+		auto_renew=CASE WHEN plan_id=0 AND auto_renew_configured=0 THEN 1 ELSE auto_renew END,
+		auto_renew_configured=1 WHERE id=? AND balance>=?`, price, p.ID, next, quota, p.Rules, p.GroupID, id, price)
 	if e != nil {
 		return e
 	}
 	if count, _ := result.RowsAffected(); count == 0 {
 		return errors.New("钱包余额不足")
+	}
+	if oldGroup != p.GroupID && !admin {
+		if e = clearUnauthorizedRuleRoutes(tx, p.GroupID, "r.owner=?", id); e != nil {
+			return e
+		}
 	}
 	order, e := tx.Exec("INSERT INTO orders(user_id,amount,credit,kind,status,description) VALUES(?,?,0,?,'paid',?)", id, price, kind, p.Name)
 	if e != nil || price == 0 {
@@ -218,7 +228,9 @@ func (s *Server) buyPlan(w http.ResponseWriter, r *http.Request, u User) {
 }
 
 func (s *Server) renew() {
-	rows, e := s.db.Query("SELECT id,plan_id FROM users WHERE auto_renew=1 AND banned=0 AND plan_id>0 AND (expires<=unixepoch() OR (quota>0 AND used>=quota)) LIMIT 100")
+	rows, e := s.db.Query(`SELECT u.id,u.plan_id FROM users u JOIN plans p ON p.id=u.plan_id
+		WHERE u.auto_renew=1 AND u.banned=0 AND u.plan_id>0 AND u.expires>0 AND p.archived=0 AND u.balance>=p.price
+		AND (u.expires<=unixepoch() OR (u.quota>0 AND u.used>=u.quota)) ORDER BY u.id LIMIT 100`)
 	if e != nil {
 		return
 	}
@@ -235,7 +247,9 @@ func (s *Server) renew() {
 		if e != nil {
 			return
 		}
-		p, e := readPlan(tx.QueryRow("SELECT "+planColumns+" FROM plans WHERE id=? AND archived=0 AND EXISTS(SELECT 1 FROM users WHERE id=? AND auto_renew=1 AND plan_id=? AND (expires<=unixepoch() OR (quota>0 AND used>=quota)))", u[1], u[0], u[1]))
+		p, e := readPlan(tx.QueryRow("SELECT "+planColumns+` FROM plans p WHERE p.id=? AND p.archived=0
+			AND EXISTS(SELECT 1 FROM users u WHERE u.id=? AND u.auto_renew=1 AND u.banned=0
+			AND u.plan_id=p.id AND u.expires>0 AND u.balance>=p.price AND (u.expires<=unixepoch() OR (u.quota>0 AND u.used>=u.quota)))`, u[1], u[0]))
 		if e == nil && purchase(tx, u[0], p, p.Price, "renew") == nil {
 			_ = tx.Commit()
 		}
@@ -692,6 +706,12 @@ func (s *Server) users(w http.ResponseWriter, r *http.Request, u User) {
 			return
 		}
 		defer tx.Rollback()
+		if !in.Admin {
+			if e = clearUnauthorizedRuleRoutes(tx, in.Group, "u.id=? AND (u.group_id<>? OR u.admin=1)", id, in.Group); e != nil {
+				dbFailure(w, e)
+				return
+			}
+		}
 		result, e := tx.Exec("UPDATE users SET admin=?,banned=?,group_id=?,quota=?,max_rules=?,expires=?,note=?,rate_override=?,ips_override=?,connections_override=?,allow_device=? WHERE id=?", in.Admin, in.Banned, in.Group, in.Quota, in.MaxRules, in.Expires, in.Note, in.RateOverride, in.IPsOverride, in.ConnectionsOverride, in.AllowDevice, id)
 		if e != nil {
 			dbFailure(w, e)
@@ -811,8 +831,31 @@ func (s *Server) userGroups(w http.ResponseWriter, r *http.Request, u User) {
 			fail(w, 400, "默认用户组须保留")
 			return
 		}
-		if _, e := s.db.Exec("DELETE FROM user_groups WHERE id=?", id); e != nil {
+		tx, err := s.db.BeginTx(r.Context(), nil)
+		if err != nil {
+			dbFailure(w, err)
+			return
+		}
+		defer tx.Rollback()
+		var authorized bool
+		err = tx.QueryRowContext(r.Context(), `SELECT EXISTS (
+			SELECT 1 FROM groups g, json_each(g.user_groups) AS selected
+			WHERE g.owner=0 AND selected.value=?
+		)`, id).Scan(&authorized)
+		if err != nil {
+			dbFailure(w, err)
+			return
+		}
+		if authorized {
+			fail(w, 409, "用户组仍被设备组授权，请先移除授权")
+			return
+		}
+		if _, err = tx.ExecContext(r.Context(), "DELETE FROM user_groups WHERE id=?", id); err != nil {
 			fail(w, 409, "用户组仍被使用")
+			return
+		}
+		if err = tx.Commit(); err != nil {
+			dbFailure(w, err)
 			return
 		}
 		w.WriteHeader(204)

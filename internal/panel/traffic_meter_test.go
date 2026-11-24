@@ -37,6 +37,7 @@ func TestTrafficAttributionAndQuota(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer s.Close()
+	giveFixtureUsersActivePlan(t, s)
 	_, err = s.db.Exec(`
 		INSERT INTO groups(id,name,kind,first_port,last_port,ratio,user_group,offline_seconds,chain) VALUES
 			(1,'entry','entry',10000,20000,1500,0,30,'[]'),(2,'exit','exit',10000,20000,3000,0,30,'[]'),

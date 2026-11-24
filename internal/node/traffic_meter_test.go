@@ -7,6 +7,7 @@ import (
 	"encoding/hex"
 	"io"
 	"net"
+	"strconv"
 	"testing"
 	"time"
 
@@ -14,6 +15,43 @@ import (
 	"hopx/internal/relay"
 	"hopx/internal/wire"
 )
+
+func TestIngressReportsKeepQuotaEpoch(t *testing.T) {
+	engine := NewEngine("127.0.0.1", 8, 32)
+	defer engine.Close()
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	_, portText, _ := net.SplitHostPort(freeTCP(t))
+	port, _ := strconv.Atoi(portText)
+	rule := wire.Forward{Rule: wire.Rule{ID: 1, Port: port, Enabled: true, Protocol: "tcp", Targets: []string{"127.0.0.1:443"}}, Ratio: 1000}
+	for epoch := int64(0); epoch <= 1; epoch++ {
+		rule.QuotaEpoch = epoch
+		if err := engine.Apply(ctx, wire.Config{Revision: strconv.FormatInt(epoch, 10), Rules: []wire.Forward{rule}}, nil); err != nil {
+			t.Fatal(err)
+		}
+		engine.activeRules[rule.ID].accounting.out.Add(epoch + 1)
+	}
+	assertEpochs := func(rows []wire.Traffic) {
+		t.Helper()
+		if len(rows) != 2 {
+			t.Fatalf("report did not separate quota periods: %+v", rows)
+		}
+		seen := make(map[int64]bool)
+		for _, row := range rows {
+			if row.QuotaEpoch == nil || *row.QuotaEpoch < 0 || *row.QuotaEpoch > 1 || seen[*row.QuotaEpoch] || row.Out != *row.QuotaEpoch+1 {
+				t.Fatalf("invalid reported quota period: %+v", row)
+			}
+			seen[*row.QuotaEpoch] = true
+		}
+	}
+	rows := engine.Traffic()
+	assertEpochs(rows)
+	if len(engine.counters) != 1 {
+		t.Fatal("retired quota period still has a counter")
+	}
+	engine.restore(rows)
+	assertEpochs(engine.Traffic())
+}
 
 func TestRelayExitMeasuresPayload(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)

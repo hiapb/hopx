@@ -54,6 +54,24 @@ func testRequest(t *testing.T, client *http.Client, method, url string, headers 
 	}
 }
 
+func subscribeTestAdmin(t *testing.T, client *http.Client, base string) {
+	t.Helper()
+	var plan Plan
+	testRequest(t, client, "POST", base+"/admin/plans", nil, Plan{Name: "Test plan", Duration: 30, Enabled: true}, 200, &plan)
+	testRequest(t, client, "POST", fmt.Sprintf("%s/plans/%d/buy", base, plan.ID), nil, nil, 204, nil)
+}
+
+func giveFixtureUsersActivePlan(t *testing.T, panel *Server) {
+	t.Helper()
+	_, err := panel.db.Exec(`
+		INSERT INTO plans(id,name,description,price,duration,quota,rules,group_id) VALUES (1,'Fixture','',0,1,0,0,0);
+		UPDATE users SET plan_id=1,expires=unixepoch()+86400;
+	`)
+	if err != nil {
+		t.Fatal(err)
+	}
+}
+
 func TestBrowserLoginThroughReverseProxy(t *testing.T) {
 	panel, err := Open(Options{
 		Database:      filepath.Join(t.TempDir(), "proxy.db"),
@@ -112,6 +130,7 @@ func TestNodeEnrollmentAndIdempotentAccounting(t *testing.T) {
 	client := &http.Client{Jar: jar}
 	url := s.URL + "/api"
 	testRequest(t, client, "POST", url+"/login", nil, map[string]string{"name": "admin", "password": "test-password-123"}, 200, nil)
+	subscribeTestAdmin(t, client, url)
 	var group wire.DeviceGroup
 	testRequest(t, client, "POST", url+"/admin/groups", nil, wire.DeviceGroup{Name: "entry", Kind: "entry", Ratio: 2000}, 200, &group)
 	var invite map[string]any
@@ -246,6 +265,7 @@ func TestRulePortPreflightValidatesWithoutReservingPort(t *testing.T) {
 	client := &http.Client{Jar: jar}
 	base := server.URL + "/api"
 	testRequest(t, client, "POST", base+"/login", nil, map[string]string{"name": "admin", "password": "test-password-123"}, 200, nil)
+	subscribeTestAdmin(t, client, base)
 	var group wire.DeviceGroup
 	testRequest(t, client, "POST", base+"/admin/groups", nil,
 		wire.DeviceGroup{Name: "preflight entry", Kind: "entry", FirstPort: 47000, LastPort: 47010, Ratio: 1000}, 200, &group)
@@ -272,6 +292,68 @@ func TestRulePortPreflightValidatesWithoutReservingPort(t *testing.T) {
 	testRequest(t, client, "POST", base+"/rules", nil, payload, 200, &second)
 	if second.Port == first.Port {
 		t.Fatalf("automatic assignment reused occupied port %d", first.Port)
+	}
+
+	var enrollment struct{ Token string }
+	testRequest(t, client, "POST", fmt.Sprintf("%s/admin/groups/%d/enrollment", base, group.ID), nil, nil, 201, &enrollment)
+	var node wire.Identity
+	testRequest(t, client, "POST", base+"/node/register", map[string]string{"Authorization": "Bearer " + enrollment.Token},
+		wire.Registration{Name: "entry node"}, 201, &node)
+	nodeHeaders := map[string]string{"Authorization": "Bearer " + node.Token, "X-Node-ID": fmt.Sprint(node.ID)}
+	testRequest(t, client, "POST", base+"/node/sync", nodeHeaders, wire.Heartbeat{AcceptPortCheck: true}, 200, nil)
+
+	payload.Name, payload.Port = "live check", 47009
+	saveWithNode := func(occupied bool) *httptest.ResponseRecorder {
+		t.Helper()
+		raw, err := json.Marshal(payload)
+		if err != nil {
+			t.Fatal(err)
+		}
+		request := httptest.NewRequest(http.MethodPost, base+"/rules", bytes.NewReader(raw))
+		for _, cookie := range client.Jar.Cookies(request.URL) {
+			request.AddCookie(cookie)
+		}
+		recorder := httptest.NewRecorder()
+		done := make(chan struct{})
+		go func() {
+			defer close(done)
+			panel.Handler().ServeHTTP(recorder, request)
+		}()
+		var task *wire.DiagnosticTask
+		deadline := time.Now().Add(2 * time.Second)
+		for task == nil && time.Now().Before(deadline) {
+			task = panel.pollDiagnostic(node.ID, nil)
+			if task == nil {
+				time.Sleep(5 * time.Millisecond)
+			}
+		}
+		if task == nil || task.PortCheck == nil || task.PortCheck.Port != payload.Port || task.PortCheck.Network != "both" {
+			t.Fatalf("rule creation did not request TCP and UDP checks: %+v", task)
+		}
+		var total struct{ Total int }
+		testRequest(t, client, "GET", base+"/rules/count", nil, nil, 200, &total)
+		if total.Total != 2 {
+			t.Fatalf("rule was already committed during the node check: %+v", total)
+		}
+		status := "available"
+		if occupied {
+			status = "occupied"
+		}
+		panel.pollDiagnostic(node.ID, &wire.DiagnosticResult{ID: task.ID, Bindings: []wire.PortBinding{
+			{Network: "tcp", Status: "available"}, {Network: "udp", Status: status},
+		}})
+		select {
+		case <-done:
+		case <-time.After(3 * time.Second):
+			t.Fatal("save did not finish after node check")
+		}
+		return recorder
+	}
+	if result := saveWithNode(true); result.Code != 409 || !bytes.Contains(result.Body.Bytes(), []byte("已被占用")) {
+		t.Fatalf("occupied socket was accepted: %d %s", result.Code, result.Body.String())
+	}
+	if result := saveWithNode(false); result.Code != 200 {
+		t.Fatalf("available socket was rejected: %d %s", result.Code, result.Body.String())
 	}
 }
 
@@ -327,6 +409,7 @@ func TestRelayRouteSurvivesPanelRestart(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	giveFixtureUsersActivePlan(t, s)
 	_, err = s.db.Exec(`
 		INSERT INTO groups(id,name,kind,first_port,last_port,ratio,user_group,offline_seconds) VALUES
 			(1,'entry','entry',10000,20000,1000,0,30),(2,'exit','exit',10000,20000,1000,0,30);
@@ -364,6 +447,7 @@ func TestQuotaReservationsAcrossNodes(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer s.Close()
+	giveFixtureUsersActivePlan(t, s)
 	if _, err = s.db.Exec("UPDATE users SET quota=100,expires=unixepoch()+600 WHERE id=1"); err != nil {
 		t.Fatal(err)
 	}

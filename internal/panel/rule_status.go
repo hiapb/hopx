@@ -69,7 +69,7 @@ func (s *Server) ruleRuntimeStatus(rows []ruleRow) error {
 	groupStatuses := make(map[int64]*groupStatus)
 	s.configMu.RLock()
 	for _, row := range rows {
-		if row.Enabled && groupStatuses[row.Entry] == nil {
+		if row.Enabled && row.RouteRepair == nil && row.ServiceBlock == "" && groupStatuses[row.Entry] == nil {
 			groupStatuses[row.Entry] = &groupStatus{current: s.configs[row.Entry].value}
 		}
 	}
@@ -87,8 +87,16 @@ func (s *Server) ruleRuntimeStatus(rows []ruleRow) error {
 	}
 	for i := range rows {
 		row := &rows[i]
+		if row.RouteRepair != nil {
+			row.Runtime = "route_repair"
+			continue
+		}
 		row.Runtime = "paused"
 		if !row.Enabled {
+			continue
+		}
+		if row.ServiceBlock != "" {
+			row.Runtime = "subscription_blocked"
 			continue
 		}
 		status := groupStatuses[row.Entry]

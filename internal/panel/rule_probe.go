@@ -60,7 +60,8 @@ func (s *Server) saveRuleProbe(ctx context.Context, ruleID int64, links []wire.L
 	// Use minute keys for new rows. Cadence checks use sampled so they include rows
 	// stored with five-minute keys by older panels and survive interval changes.
 	_, err = s.db.ExecContext(ctx, `INSERT OR IGNORE INTO rule_probe_samples(rule,bucket,sampled,links)
-		SELECT r.id,?,?,? FROM rules r WHERE r.id=? AND json_extract(r.json,'$.enabled')=1
+		SELECT r.id,?,?,? FROM rules r JOIN users u ON u.id=r.owner
+		WHERE r.id=? AND json_extract(r.json,'$.enabled')=1 AND `+ruleServiceActiveSQL+` AND `+ruleRouteReadySQL+`
 		AND NOT EXISTS (SELECT 1 FROM rule_probe_samples p WHERE p.rule=r.id
 			AND p.sampled>?-(`+ruleProbeIntervalSQL+`))`, at/60, at, string(data), ruleID, at)
 	if err != nil && ctx.Err() == nil {
@@ -120,8 +121,9 @@ func (s *Server) probeRuleBatch(ctx context.Context, cursor int64) (int64, error
 	for group := range nodes {
 		groups = append(groups, strconv.FormatInt(group, 10))
 	}
-	rows, err := s.db.QueryContext(ctx, `SELECT r.id,r.entry,`+ruleProbeIntervalSQL+` FROM rules r
+	rows, err := s.db.QueryContext(ctx, `SELECT r.id,r.entry,`+ruleProbeIntervalSQL+` FROM rules r JOIN users u ON u.id=r.owner
 		WHERE r.id>? AND r.entry IN (`+strings.Join(groups, ",")+`) AND json_extract(r.json,'$.enabled')=1
+		AND `+ruleServiceActiveSQL+` AND `+ruleRouteReadySQL+`
 		AND coalesce(json_extract(r.json,'$.tlsShared'),0)=0
 		AND NOT EXISTS(SELECT 1 FROM rule_probe_samples p WHERE p.rule=r.id AND p.sampled>?-(`+ruleProbeIntervalSQL+`))
 		ORDER BY r.id LIMIT 64`, cursor, now.Unix())
@@ -239,15 +241,25 @@ type probeHistoryLane struct {
 func (s *Server) ruleProbeHistory(w http.ResponseWriter, r *http.Request, u User) {
 	id := pathID(r)
 	var entry, interval, latest int64
-	err := s.db.QueryRowContext(r.Context(), `SELECT entry,`+ruleProbeIntervalSQL+`,
+	var serviceBlock string
+	var routeReady bool
+	err := s.db.QueryRowContext(r.Context(), `SELECT r.entry,`+ruleProbeIntervalSQL+`,`+ruleServiceBlockSQL+`,`+ruleRouteReadySQL+`,
 		coalesce((SELECT max(sampled) FROM rule_probe_samples WHERE rule=r.id AND sampled>=unixepoch()-604800),0)
-		FROM rules r WHERE id=? AND (owner=? OR ?)`, id, u.ID, u.Admin).Scan(&entry, &interval, &latest)
+		FROM rules r JOIN users u ON u.id=r.owner WHERE r.id=? AND (r.owner=? OR ?)`, id, u.ID, u.Admin).Scan(&entry, &interval, &serviceBlock, &routeReady, &latest)
 	if errors.Is(err, sql.ErrNoRows) {
 		fail(w, 404, "规则不存在")
 		return
 	}
 	if err != nil {
 		dbFailure(w, err)
+		return
+	}
+	if serviceBlock != "" {
+		fail(w, 403, serviceBlock)
+		return
+	}
+	if !routeReady {
+		fail(w, 409, ruleRouteRepairMessage)
 		return
 	}
 	group, err := scanGroup(s.db.QueryRowContext(r.Context(), groupSelect+" WHERE id=?", entry))

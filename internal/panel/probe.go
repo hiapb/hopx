@@ -135,15 +135,29 @@ func (s *Server) probeConnectivity(w http.ResponseWriter, r *http.Request, u Use
 	if !decode(w, r, &input) {
 		return
 	}
-	var config string
-	err := s.db.QueryRow("SELECT json FROM rules WHERE id=? AND entry=? AND (owner=? OR ?) AND json_extract(json,'$.enabled')=1", input.RuleID, node.GroupID, u.ID, u.Admin).Scan(&config)
-	if err != nil {
+	var config, serviceBlock string
+	err := s.db.QueryRowContext(r.Context(), `SELECT r.json,`+ruleServiceBlockSQL+`
+		FROM rules r JOIN users u ON u.id=r.owner WHERE r.id=? AND r.entry=? AND (r.owner=? OR ?)
+		AND json_extract(r.json,'$.enabled')=1`, input.RuleID, node.GroupID, u.ID, u.Admin).Scan(&config, &serviceBlock)
+	if errors.Is(err, sql.ErrNoRows) {
 		fail(w, 404, "该入口没有这条已启用规则")
+		return
+	}
+	if err != nil {
+		dbFailure(w, err)
+		return
+	}
+	if serviceBlock != "" {
+		fail(w, 403, serviceBlock)
 		return
 	}
 	var rule wire.Rule
 	if json.Unmarshal([]byte(config), &rule) != nil || len(rule.Targets) == 0 || !targetOK(rule.Targets[0]) {
 		fail(w, 400, "目标地址无效")
+		return
+	}
+	if rule.RouteRepair != nil {
+		fail(w, 409, ruleRouteRepairMessage)
 		return
 	}
 	group, err := scanGroup(s.db.QueryRow(groupSelect+" WHERE id=?", node.GroupID))
@@ -183,9 +197,11 @@ type entryDiagnostic struct {
 func (s *Server) diagnoseRule(w http.ResponseWriter, r *http.Request, u User) {
 	id := pathID(r)
 	var rule wire.Rule
-	var raw string
+	var raw, serviceBlock string
 	var entryID, ownerID int64
-	err := s.db.QueryRowContext(r.Context(), "SELECT entry,owner,json FROM rules WHERE id=? AND (owner=? OR ?)", id, u.ID, u.Admin).Scan(&entryID, &ownerID, &raw)
+	err := s.db.QueryRowContext(r.Context(), `SELECT r.entry,r.owner,r.json,`+ruleServiceBlockSQL+`
+		FROM rules r JOIN users u ON u.id=r.owner WHERE r.id=? AND (r.owner=? OR ?)`,
+		id, u.ID, u.Admin).Scan(&entryID, &ownerID, &raw, &serviceBlock)
 	if errors.Is(err, sql.ErrNoRows) {
 		fail(w, 404, "规则不存在")
 		return
@@ -195,6 +211,14 @@ func (s *Server) diagnoseRule(w http.ResponseWriter, r *http.Request, u User) {
 	}
 	if err != nil {
 		dbFailure(w, err)
+		return
+	}
+	if serviceBlock != "" {
+		fail(w, 403, serviceBlock)
+		return
+	}
+	if rule.RouteRepair != nil {
+		fail(w, 409, ruleRouteRepairMessage)
 		return
 	}
 	group, err := scanGroup(s.db.QueryRowContext(r.Context(), groupSelect+" WHERE id=?", entryID))

@@ -43,12 +43,20 @@ func (s *Server) assignUserPlan(w http.ResponseWriter, r *http.Request, _ User) 
 			return
 		}
 	}
-	result, err := tx.Exec(`UPDATE users SET plan_id=?, quota=CASE WHEN ? THEN ? ELSE quota END,
+	if input.Group {
+		if err = clearUnauthorizedRuleRoutes(tx, group, "u.id=? AND u.admin=0 AND u.group_id<>?", pathID(r), group); err != nil {
+			dbFailure(w, err)
+			return
+		}
+	}
+	result, err := tx.Exec(`UPDATE users SET plan_id=?1, quota=CASE WHEN ? THEN ? ELSE quota END,
 		used=CASE WHEN ? THEN 0 ELSE used END, billing_remainder=CASE WHEN ? THEN 0 ELSE billing_remainder END,
 		quota_epoch=quota_epoch+CASE WHEN ? THEN 1 ELSE 0 END,
 		max_rules=CASE WHEN ? THEN ? ELSE max_rules END, group_id=CASE WHEN ? THEN ? ELSE group_id END,
 		rate_override=CASE WHEN ? THEN NULL ELSE rate_override END, ips_override=CASE WHEN ? THEN NULL ELSE ips_override END,
-		connections_override=CASE WHEN ? THEN NULL ELSE connections_override END WHERE id=?`,
+		connections_override=CASE WHEN ? THEN NULL ELSE connections_override END,
+		auto_renew=CASE WHEN ?1>0 AND plan_id=0 AND auto_renew_configured=0 THEN 1 ELSE auto_renew END,
+		auto_renew_configured=CASE WHEN ?1>0 OR plan_id>0 THEN 1 ELSE auto_renew_configured END WHERE id=?`,
 		input.PlanID, input.Quota, quota, input.Quota, input.Quota, input.Quota, input.Rules, maxRules, input.Group, group, input.Limits, input.Limits, input.Limits, pathID(r))
 	if err != nil {
 		dbFailure(w, err)
@@ -430,7 +438,7 @@ func (s *Server) ruleStatistics(w http.ResponseWriter, r *http.Request, u User) 
 		Inbound   int64 `json:"inbound"`
 		Outbound  int64 `json:"outbound"`
 	}
-	err := s.db.QueryRowContext(r.Context(), `SELECT count(*),coalesce(sum(json_extract(r.json,'$.enabled')=1),0),
+	err := s.db.QueryRowContext(r.Context(), `SELECT count(*),coalesce(sum(json_extract(r.json,'$.enabled')=1 AND `+ruleRouteReadySQL+`),0),
 		coalesce(sum(t.inbound),0),coalesce(sum(t.outbound),0)
 		FROM rules r LEFT JOIN traffic t ON t.rule_id=r.id WHERE r.owner=? OR ?`, u.ID, u.Admin).
 		Scan(&out.Total, &out.Enabled, &out.Inbound, &out.Outbound)
@@ -638,32 +646,36 @@ func (s *Server) removeInvalidRules(w http.ResponseWriter, r *http.Request, _ Us
 	respond(w, 200, map[string]int64{"count": count})
 }
 
-func (s *Server) userService(w http.ResponseWriter, r *http.Request, u User) {
-	var out struct {
-		Group                     string `json:"group"`
-		Plan                      string `json:"plan"`
-		RenewPrice                int64  `json:"renewPrice"`
-		RateMbps                  int    `json:"rateMbps"`
-		MaxIPs                    int    `json:"maxIPs"`
-		MaxConnections            int    `json:"maxConnections"`
-		InviteRegistrationEnabled bool   `json:"inviteRegistrationEnabled"`
-		ReferralRate              int    `json:"referralRate"`
-		ReferralFirstOnly         bool   `json:"referralFirstOnly"`
-	}
-	err := s.db.QueryRowContext(r.Context(), `SELECT g.name,coalesce(p.name,''),coalesce(p.price,0),
+type userServiceInfo struct {
+	Group                     string `json:"group"`
+	Plan                      string `json:"plan"`
+	RenewPrice                int64  `json:"renewPrice"`
+	RateMbps                  int    `json:"rateMbps"`
+	MaxIPs                    int    `json:"maxIPs"`
+	MaxConnections            int    `json:"maxConnections"`
+	InviteRegistrationEnabled bool   `json:"inviteRegistrationEnabled"`
+	ReferralRate              int    `json:"referralRate"`
+	ReferralFirstOnly         bool   `json:"referralFirstOnly"`
+}
+
+func (s *Server) loadUserService(ctx context.Context, id int64) (out userServiceInfo, err error) {
+	err = s.db.QueryRowContext(ctx, `SELECT g.name,coalesce(p.name,''),coalesce(p.price,0),
 		coalesce(u.rate_override,p.rate_mbps,0),coalesce(u.ips_override,p.max_ips,0),coalesce(u.connections_override,p.max_connections,0),
-		coalesce(rs.registration_enabled,1),
+		coalesce(rs.registration_enabled,1) AND coalesce((SELECT value FROM settings WHERE key='registration'),'closed') NOT IN ('closed','no-invite'),
 		coalesce(rs.rate,(SELECT CAST(value AS INTEGER) FROM settings WHERE key='referralRate'),0),
 		coalesce(rs.first_only,(SELECT value='true' FROM settings WHERE key='referralFirstOnly'),0)
 		FROM users u JOIN user_groups g ON g.id=u.group_id LEFT JOIN plans p ON p.id=u.plan_id
-		LEFT JOIN user_referral_settings rs ON rs.user_id=u.id WHERE u.id=?`, u.ID).
+		LEFT JOIN user_referral_settings rs ON rs.user_id=u.id WHERE u.id=?`, id).
 		Scan(&out.Group, &out.Plan, &out.RenewPrice, &out.RateMbps, &out.MaxIPs, &out.MaxConnections,
 			&out.InviteRegistrationEnabled, &out.ReferralRate, &out.ReferralFirstOnly)
+	return out, err
+}
+
+func (s *Server) userService(w http.ResponseWriter, r *http.Request, u User) {
+	out, err := s.loadUserService(r.Context(), u.ID)
 	if err != nil {
 		dbFailure(w, err)
 		return
 	}
-	mode := s.setting("registration", "closed")
-	out.InviteRegistrationEnabled = out.InviteRegistrationEnabled && mode != "closed" && mode != "no-invite"
 	respond(w, 200, out)
 }

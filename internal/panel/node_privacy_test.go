@@ -55,6 +55,7 @@ func TestNodeAddressesAndCredentialsStayScoped(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	giveFixtureUsersActivePlan(t, s)
 	_, err = s.db.Exec(`
 		INSERT INTO groups(id,name,kind,first_port,last_port,ratio,user_group,offline_seconds,owner) VALUES
 			(1,'site entry','entry',10000,20000,1000,0,30,0),
@@ -132,13 +133,13 @@ func TestRoutingOnlyUsesConfiguredReverseNodes(t *testing.T) {
 func TestPersonalExitCanOnlyTerminateTheRoute(t *testing.T) {
 	entry := wire.DeviceGroup{ID: 1, Kind: "entry"}
 	lookup := func(id int64) (wire.DeviceGroup, error) {
-		group := wire.DeviceGroup{ID: id, Kind: "exit"}
+		group := wire.DeviceGroup{ID: id, Kind: "exit", UserGroups: []int64{1}}
 		if id == 2 {
 			group.Owner = 1
 		}
 		return group, nil
 	}
-	user := User{ID: 1}
+	user := User{ID: 1, Group: 1}
 	if _, _, err := resolvePath(user, entry, []int64{2, 3}, lookup); err == nil {
 		t.Fatal("user-managed exit was allowed to relay another site's connection")
 	}
@@ -156,12 +157,14 @@ func TestSharedTargetPolicyPreservesTrustedPaths(t *testing.T) {
 	if err = s.addUser("member", "member-password", false, sql.NullInt64{}); err != nil {
 		t.Fatal(err)
 	}
+	giveFixtureUsersActivePlan(t, s)
 	_, err = s.db.Exec(`
-		UPDATE users SET expires=unixepoch()+86400 WHERE id=2;
-		INSERT INTO groups(id,name,kind,first_port,last_port,ratio,user_group,offline_seconds,owner) VALUES
-			(1,'site entry','entry',10000,20000,1000,0,30,0),
-			(2,'site exit','exit',10000,20000,1000,0,30,0),
-			(3,'personal exit','exit',10000,20000,1000,0,30,2);
+		INSERT INTO user_groups(id,name) VALUES (1,'Members');
+		UPDATE users SET group_id=1 WHERE id=2;
+		INSERT INTO groups(id,name,kind,first_port,last_port,ratio,user_group,offline_seconds,owner,user_groups) VALUES
+			(1,'site entry','entry',10000,20000,1000,1,30,0,'[]'),
+			(2,'site exit','exit',10000,20000,1000,0,30,0,'[1]'),
+			(3,'personal exit','exit',10000,20000,1000,0,30,2,'[]');
 		INSERT INTO rules(id,owner,entry,port,json) VALUES
 			(1,2,1,10001,'{"enabled":true,"path":[2],"backupPath":[3],"targets":["localhost:443"]}'),
 			(2,2,1,10002,'{"enabled":true,"targets":["8.8.8.8:443"]}'),

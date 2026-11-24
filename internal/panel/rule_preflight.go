@@ -1,21 +1,116 @@
 package panel
 
 import (
+	"context"
 	"database/sql"
+	"errors"
 	"fmt"
 	"net/http"
 	"strconv"
+	"strings"
 	"sync"
+	"time"
 
 	"hopx/internal/wire"
 )
 
 const portCheckPageSize = 8
+const automaticPortCheckTimeout = 12 * time.Second
 
 type rulePortCheck struct {
 	Name     string             `json:"name"`
 	Status   string             `json:"status"`
 	Bindings []wire.PortBinding `json:"bindings,omitempty"`
+}
+
+func forwardingPortCheck(rule wire.Rule, group wire.DeviceGroup) wire.PortCheck {
+	check := wire.PortCheck{Port: rule.Port, Network: group.RuleNetwork(rule), HAProxy: rule.UsesHAProxy()}
+	if group.Ingress.BlocksUDP() && check.Network == "both" {
+		check.Network = "tcp"
+	}
+	return check
+}
+
+func (s *Server) hasPortCheckNode(group int64) bool {
+	now := time.Now()
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	for _, node := range s.devices {
+		if node.GroupID == group && node.AcceptPortCheck && now.Sub(node.LastSeen) < time.Hour {
+			return true
+		}
+	}
+	return false
+}
+
+func (s *Server) checkNewRulePort(ctx context.Context, check wire.PortCheck, group wire.DeviceGroup, user User) (int, error) {
+	devices, err := s.deviceGroupSnapshot(false, group.ID)
+	if err != nil {
+		return http.StatusInternalServerError, err
+	}
+	ctx, cancel := context.WithTimeout(ctx, automaticPortCheckTimeout)
+	defer cancel()
+
+	type outcome struct {
+		status int
+		err    error
+	}
+	results := make(chan outcome, portCheckPageSize)
+	var pending int
+	consume := func() outcome {
+		pending--
+		return <-results
+	}
+	for _, device := range devices {
+		if !device.Online || device.Revoked || !device.AcceptPortCheck {
+			continue
+		}
+		if pending == cap(results) {
+			if result := consume(); result.err != nil {
+				return result.status, result.err
+			}
+		}
+		if ctx.Err() != nil {
+			return http.StatusServiceUnavailable, errors.New("入口节点端口检查超时，请稍后再试")
+		}
+		pending++
+		go func() {
+			task := wire.DiagnosticTask{ID: token(), PortCheck: &check}
+			result, status := s.waitDiagnostic(ctx, device.ID, task)
+			if status != http.StatusOK || len(result.Bindings) == 0 {
+				if status == http.StatusTooManyRequests {
+					results <- outcome{http.StatusServiceUnavailable, errors.New("入口节点正在处理其他检查，请稍后再试")}
+				} else {
+					results <- outcome{http.StatusServiceUnavailable, errors.New("入口节点端口检查超时，请稍后再试")}
+				}
+				return
+			}
+			source := "入口节点"
+			if (user.Admin || group.Owner == user.ID) && group.Routing.StatusVisibility != "none" {
+				source = device.Name
+			}
+			for _, binding := range result.Bindings {
+				switch binding.Status {
+				case "available":
+					continue
+				case "occupied":
+					results <- outcome{http.StatusConflict, fmt.Errorf("%s的 %s 端口 %d 已被占用，请更换监听端口", source, strings.ToUpper(binding.Network), check.Port)}
+				case "no_haproxy":
+					results <- outcome{http.StatusConflict, fmt.Errorf("%s 尚未安装 HAProxy", source)}
+				default:
+					results <- outcome{http.StatusConflict, fmt.Errorf("%s 无法监听端口 %d", source, check.Port)}
+				}
+				return
+			}
+			results <- outcome{}
+		}()
+	}
+	for pending > 0 {
+		if result := consume(); result.err != nil {
+			return result.status, result.err
+		}
+	}
+	return 0, nil
 }
 
 func (s *Server) preflightRule(w http.ResponseWriter, r *http.Request, u User) {
@@ -35,10 +130,7 @@ func (s *Server) preflightRule(w http.ResponseWriter, r *http.Request, u User) {
 		return
 	}
 	page, _ := strconv.Atoi(r.URL.Query().Get("page"))
-	check := wire.PortCheck{Port: rule.Port, Network: group.RuleNetwork(rule), HAProxy: rule.UsesHAProxy()}
-	if group.Ingress != nil && (group.Ingress.DisableUDP || len(group.Ingress.AllowedHosts) > 0) && check.Network == "both" {
-		check.Network = "tcp"
-	}
+	check := forwardingPortCheck(rule, group)
 	if rule.TLSSharedPort != 0 || (!u.Admin && group.Owner != u.ID) {
 		port := rule.Port
 		if rule.TLSSharedPort != 0 {

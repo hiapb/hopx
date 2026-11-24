@@ -98,9 +98,11 @@ type User struct {
 	Invite              string `json:"invite"`
 	AutoRenew           bool   `json:"autoRenew"`
 	Note                string `json:"note"`
+	ServiceBlock        string `json:"serviceBlock,omitempty"`
 }
 
-const userSelect = "SELECT id,name,admin,banned,group_id,quota,used,balance,expires,max_rules,plan_id,invite,auto_renew,note,rate_override,ips_override,connections_override,affiliate_balance,allow_device FROM users"
+const userColumns = "id,name,admin,banned,group_id,quota,used,balance,expires,max_rules,plan_id,invite,auto_renew,note,rate_override,ips_override,connections_override,affiliate_balance,allow_device"
+const userSelect = "SELECT " + userColumns + " FROM users"
 
 type scanner interface{ Scan(...any) error }
 
@@ -141,7 +143,8 @@ func Open(o Options) (*Server, error) {
 		},
 		"users": {
 			"billing_remainder": "INTEGER NOT NULL DEFAULT 0", "quota_epoch": "INTEGER NOT NULL DEFAULT 0",
-			"rate_override": "INTEGER", "ips_override": "INTEGER", "connections_override": "INTEGER",
+			"auto_renew_configured": "INTEGER NOT NULL DEFAULT 0",
+			"rate_override":         "INTEGER", "ips_override": "INTEGER", "connections_override": "INTEGER",
 			"affiliate_balance": "INTEGER NOT NULL DEFAULT 0", "allow_device": "INTEGER NOT NULL DEFAULT 0",
 		},
 		"user_groups":            {"show_order": "INTEGER NOT NULL DEFAULT 0"},
@@ -274,7 +277,10 @@ func (s *Server) sessionUser(r *http.Request) (User, error) {
 	if err != nil {
 		return User{}, err
 	}
-	return readUser(s.db.QueryRowContext(r.Context(), userSelect+" WHERE id=(SELECT user_id FROM sessions WHERE token=? AND expires>unixepoch())", digest(c.Value)))
+	var u User
+	err = scanUser(s.db.QueryRowContext(r.Context(), "SELECT "+userColumns+","+ruleServiceBlockSQL+
+		" FROM users u WHERE id=(SELECT user_id FROM sessions WHERE token=? AND expires>unixepoch())", digest(c.Value)), &u, &u.ServiceBlock)
+	return u, err
 }
 
 func (s *Server) auth(w http.ResponseWriter, r *http.Request) (User, bool) {
@@ -441,7 +447,15 @@ func (s *Server) me(w http.ResponseWriter, r *http.Request, u User) {
 	if !u.Admin {
 		u.Note = ""
 	}
-	respond(w, 200, u)
+	service, err := s.loadUserService(r.Context(), u.ID)
+	if err != nil {
+		dbFailure(w, err)
+		return
+	}
+	respond(w, 200, struct {
+		User
+		Service userServiceInfo `json:"service"`
+	}{u, service})
 }
 
 func (s *Server) profile(w http.ResponseWriter, r *http.Request, u User) {
@@ -476,7 +490,7 @@ func (s *Server) profile(w http.ResponseWriter, r *http.Request, u User) {
 		}
 	}
 	if err == nil && input.AutoRenew != nil {
-		_, err = tx.Exec("UPDATE users SET auto_renew=? WHERE id=?", *input.AutoRenew, u.ID)
+		_, err = tx.Exec("UPDATE users SET auto_renew=?,auto_renew_configured=1 WHERE id=?", *input.AutoRenew, u.ID)
 	}
 	if err == nil && input.ResetInvite {
 		_, err = tx.Exec("UPDATE users SET invite=? WHERE id=?", token()[:16], u.ID)

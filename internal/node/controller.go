@@ -290,7 +290,12 @@ func Run(ctx context.Context, settings Settings) error {
 				forward.Protocol = (wire.DeviceGroup{}).RuleNetwork(forward.Rule)
 			}
 		}
-		if e = engine.Apply(dataContext, config, nil); e != nil {
+		startup := config
+		if slices.ContainsFunc(config.Rules, meteredProxy) {
+			startup.Rules = slices.DeleteFunc(slices.Clone(config.Rules), meteredProxy)
+			startup.Revision = "waiting-for-traffic-sync"
+		}
+		if e = engine.Apply(dataContext, startup, nil); e != nil {
 			if verifyUpgrade {
 				return fmt.Errorf("load last applied config: %w", e)
 			}
@@ -370,9 +375,9 @@ func Run(ctx context.Context, settings Settings) error {
 			return nil
 		}
 		delay := settings.Period
-		report, e := prepareReport(engine, spool)
-		if e != nil {
-			slog.Warn("traffic spool", "error", e)
+		report, reportErr := prepareReport(engine, spool)
+		if reportErr != nil {
+			slog.Warn("traffic spool", "error", reportErr)
 		}
 		revision, listeners, connections := engine.Status()
 		metrics := gauge.sample(settings.Directory)
@@ -483,6 +488,9 @@ func Run(ctx context.Context, settings Settings) error {
 			if report != nil && reply.Ack == report.ID {
 				_ = os.Remove(filepath.Join(spool, report.ID+".json"))
 			}
+			if reportErr == nil && (report == nil || reply.Ack == report.ID) {
+				engine.authorizeProxyTraffic(settings.Period)
+			}
 			engine.quota.apply(reply.QuotaGrants, reply.ClosedGrants)
 			if reverseClient != nil {
 				reverseClient.Update(reply.Reverse)
@@ -523,7 +531,7 @@ func Run(ctx context.Context, settings Settings) error {
 				}
 			}
 			if next != nil {
-				e = engine.Apply(dataContext, *next, func() error {
+				e = engine.apply(dataContext, *next, func() error {
 					packed := *next
 					packed.Rules, packed.RouteSets = wire.PackRoutes(next.Rules)
 					// Keep managed sockets closed if an older node reads the cache during rollback.
@@ -540,6 +548,13 @@ func Run(ctx context.Context, settings Settings) error {
 						}
 					}
 					return toFile(cached, &packed)
+				}, func() error {
+					for _, path := range []string{cached, legacyCached} {
+						if err := os.Remove(path); err != nil && !os.IsNotExist(err) {
+							return err
+						}
+					}
+					return nil
 				})
 				if e != nil {
 					snapshotOK = false

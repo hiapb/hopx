@@ -1,4 +1,4 @@
-import { Component, lazy, Suspense, useEffect, useState } from "react";
+import { Component, lazy, startTransition, Suspense, useEffect, useState } from "react";
 import type { ComponentType, ReactNode } from "react";
 import { createRoot } from "react-dom/client";
 import {
@@ -334,6 +334,8 @@ function Login({ site, done, invite }: { site: Site; done: () => Promise<void>; 
   );
 }
 
+const initialSite: Site = { name: "HopX", announcement: "", registration: "closed" };
+
 function Shell({
   dark,
   setDark,
@@ -342,23 +344,20 @@ function Shell({
   setDark: (value: boolean) => void;
 }) {
   const session = useData<User | null>("/me", null);
-  const site = useData<Site>("/site", {
-    name: "HopX",
-    announcement: "",
-    registration: "closed",
-  });
+  const site = useData<Site>("/site", initialSite);
   const [path, setPath] = useState(location.hash.slice(2));
   const [expanded, setExpanded] = useState(true);
   const [mobile, setMobile] = useState(false);
   useEffect(() => {
     const change = () => {
-      setPath(location.hash.slice(2));
+      const next = location.hash.slice(2);
+      startTransition(() => setPath(next));
       setMobile(false);
     };
     window.addEventListener("hashchange", change);
     return () => window.removeEventListener("hashchange", change);
   }, []);
-  if (!session.value && session.busy)
+  if ((!session.value && session.busy) || (site.value === initialSite && site.busy))
     return (
       <div className="loading-screen">
         <Spin size="large" />
@@ -464,7 +463,6 @@ function Shell({
         </nav>
       </aside>
       <main className="content">
-        <PageBoundary key={path}>
         <Suspense
           fallback={
             <div className="loading-screen">
@@ -472,6 +470,7 @@ function Shell({
             </div>
           }
         >
+        <PageBoundary key={path}>
           {!accessible ? (
             <Alert type="info" showIcon message="此页面当前不可用" />
           ) : page === "" ? (
@@ -479,12 +478,12 @@ function Shell({
           ) : page === "dashboard" ? (
             <AdminDashboard />
           ) : page === "profile" ? (
-            <Profile user={user} site={site.value} refresh={refresh} />
+            <Profile user={user} site={site.value} refresh={session.reload} />
           ) : page === "settings" ? (
             <SiteSettings key={path} refresh={refresh} initialSection={new URLSearchParams(query).get("section")} />
           ) : page === "rules" ? (
             <Rules key={path} user={user} initialQuery={ruleQuery.toString()} refreshUser={session.reload}
-              siteProbeInterval={site.value.ruleProbeInterval === "60" ? 60 : 300} />
+              siteProbeInterval={site.value.ruleProbeInterval === "60" ? 60 : 300} showShop={user.admin || !disabledMenus.has("shop")} />
           ) : page === "nodes" ? (
             <Nodes user={user} lookingGlass={site.value.lookingGlass === "true"} />
           ) : (
@@ -495,8 +494,8 @@ function Shell({
               refresh={refresh}
             />
           )}
-        </Suspense>
         </PageBoundary>
+        </Suspense>
       </main>
     </div>
   );

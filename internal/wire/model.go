@@ -118,6 +118,15 @@ type Rule struct {
 	TLSCert         string   `json:"tlsCert,omitempty"`
 	TLSKey          string   `json:"tlsKey,omitempty"`
 	TLSGenerateFor  string   `json:"tlsGenerateFor,omitempty"`
+
+	RouteRepair  *RuleRouteRepair `json:"routeRepair,omitempty"`
+	ConfirmRoute bool             `json:"confirmRoute,omitempty"`
+}
+
+type RuleRouteRepair struct {
+	Entry      bool `json:"entry,omitempty"`
+	Path       bool `json:"path,omitempty"`
+	BackupPath bool `json:"backupPath,omitempty"`
 }
 
 func (r Rule) HasTLSPolicy() bool {
@@ -218,6 +227,7 @@ type ConfigDelta struct {
 type Traffic struct {
 	ExitMeter    string `json:"exitMeter,omitempty"`
 	QuotaManaged bool   `json:"quotaManaged,omitempty"`
+	QuotaEpoch   *int64 `json:"quotaEpoch,omitempty"`
 	RuleID       int64  `json:"ruleId"`
 	In           int64  `json:"in"`
 	Out          int64  `json:"out"`

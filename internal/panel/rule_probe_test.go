@@ -26,6 +26,7 @@ func TestRuleProbeIntervalKeepsExistingHistory(t *testing.T) {
 	client := &http.Client{Jar: jar}
 	base := server.URL + "/api"
 	testRequest(t, client, "POST", base+"/login", nil, map[string]string{"name": "admin", "password": "sampling-fixture-password"}, 200, nil)
+	subscribeTestAdmin(t, client, base)
 	var group wire.DeviceGroup
 	testRequest(t, client, "POST", base+"/admin/groups", nil, wire.DeviceGroup{Name: "probe ingress", Kind: "entry", Ratio: 1000}, 200, &group)
 

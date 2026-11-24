@@ -167,7 +167,7 @@ export function portChanges(input: string, entry?: Group) {
 
 export function ruleExport(rows: Rule[]) {
   return [...rows].sort((a, b) => a.id - b.id).map(row => {
-    const { in: _, out: __, runtime, reportedAt, effectiveNetwork, ownerName, ...rule } = row;
+    const { in: _, out: __, runtime, reportedAt, effectiveNetwork, ownerName, serviceBlock, ...rule } = row;
     return rule;
   });
 }
@@ -175,6 +175,7 @@ export function ruleExport(rows: Rule[]) {
 export function nyanpassExport(rows: Rule[], groups: Group[]) {
   const entries = new Map(groups.map(group => [group.id, group]));
   return [...rows].sort((a, b) => a.id - b.id).map(rule => {
+    if (rule.routeRepair) throw new Error(rule.name + "待重新选择线路，保存后可导出为 nyanpass JSON");
     if (rule.protocol === "haproxy-tcp" || rule.protocol === "haproxy-both") {
       throw new Error(rule.name + " 使用 HAProxy 转发，请使用 HopX 导出");
     }

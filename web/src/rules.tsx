@@ -4,6 +4,7 @@ import {
   Alert,
   App,
   Button,
+  Checkbox,
   Descriptions,
   Drawer,
   Dropdown,
@@ -12,7 +13,6 @@ import {
   Input,
   InputNumber,
   Modal,
-  Pagination,
   Select,
   Space,
   Switch,
@@ -38,7 +38,7 @@ import {
   ChevronDown,
   ChevronRight,
 } from "lucide-react";
-import { api, bytes, date, ruleLimitLabel, useData } from "./api";
+import { api, bytes, date, hasPlan, planExpiryLabel, ruleLimitLabel, useData } from "./api";
 import type { DataReload, Group, Rule, User } from "./api";
 import RefreshButton from "./refresh-button";
 import { useConfirmAction } from "./confirm-action";
@@ -67,25 +67,6 @@ type InputRule = Omit<Rule, "targets" | "path" | "backupPath" | "tlsAllowedUsers
 };
 type BatchInput = { entry?: number; path?: number[]; targets: string; options?: string };
 type RuleFilters = { name?: string; entry?: number; exit?: number; port?: number; target?: string };
-type PortPreflight = {
-  port: number;
-  network: string;
-  mode: "panel" | "node";
-  page: number;
-  pageSize: number;
-  total: number;
-  nodes: {
-    name: string;
-    status: string;
-    bindings?: { network: string; address: string; status: string }[];
-  }[];
-};
-const portCheckLabels: Record<string, string> = {
-  offline: "节点离线", upgrade: "节点需更新", busy: "节点正在执行其他诊断", timeout: "检查超时",
-  available: "可监听", in_use_by_rule: "可复用本规则的监听", occupied: "端口已占用",
-  unavailable: "无法监听", no_haproxy: "未安装 HAProxy",
-};
-
 const runtimeLabels: Record<string, { label: string; color: string }> = {
   paused: { label: "已暂停", color: "default" },
   offline: { label: "入口离线", color: "default" },
@@ -93,6 +74,8 @@ const runtimeLabels: Record<string, { label: string; color: string }> = {
   failed: { label: "入口应用失败", color: "error" },
   proxy_unavailable: { label: "入口未安装 HAProxy", color: "warning" },
   inactive: { label: "未下发", color: "warning" },
+  route_repair: { label: "待重新选线", color: "warning" },
+  subscription_blocked: { label: "转发已停用", color: "warning" },
   waiting_exit: { label: "出口不可用", color: "warning" },
   partial: { label: "部分入口已生效", color: "warning" },
   running: { label: "已生效", color: "success" },
@@ -100,14 +83,17 @@ const runtimeLabels: Record<string, { label: string; color: string }> = {
 
 function RuleStatus({ rule }: { rule: Rule }) {
   const status = runtimeLabels[rule.runtime || (rule.enabled ? "syncing" : "paused")];
-  return <Tag className="rule-status" color={status?.color} title={rule.reportedAt ? "最近心跳 " + date(rule.reportedAt) : undefined}>{status?.label || "等待同步"}</Tag>;
+  const title = rule.routeRepair ? "设备组权限已变更，请重新选择线路" :
+    rule.serviceBlock || (rule.reportedAt ? "最近心跳 " + date(rule.reportedAt) : undefined);
+  return <Tag className="rule-status" color={status?.color} title={title}>{status?.label || "等待同步"}</Tag>;
 }
 
-export default function Rules({ user, initialQuery, refreshUser, siteProbeInterval }: {
+export default function Rules({ user, initialQuery, refreshUser, siteProbeInterval, showShop }: {
   user: User;
   initialQuery?: string;
   refreshUser: DataReload;
   siteProbeInterval: number;
+  showShop: boolean;
 }) {
   const screens = Grid.useBreakpoint();
   const narrow = screens.md === false;
@@ -140,11 +126,9 @@ export default function Rules({ user, initialQuery, refreshUser, siteProbeInterv
   const [cursors, setCursors] = useState<string[]>([]);
   const [selected, setSelected] = useState<Key[]>([]);
   const [editing, setEditing] = useState<Partial<Rule> | null>(null);
-  const portRequest = useRef<AbortController | null>(null);
-  const [portPreflight, setPortPreflight] = useState<PortPreflight>();
-  const [portError, setPortError] = useState("");
-  const [checkingPort, setCheckingPort] = useState(false);
-  useEffect(() => () => portRequest.current?.abort(), []);
+  const saveRequest = useRef<AbortController | null>(null);
+  const [saveError, setSaveError] = useState("");
+  useEffect(() => () => saveRequest.current?.abort(), []);
   const [detailID, setDetailID] = useState<number>();
   const [addressRule, setAddressRule] = useState<Rule>();
   const [jsonRule, setJsonRule] = useState<Rule>();
@@ -197,7 +181,11 @@ export default function Rules({ user, initialQuery, refreshUser, siteProbeInterv
   const firstRule = !list.value.length && !list.busy && !list.error && !hasFilter && !adminSearch && !before && offset === 0;
   const allRules = useData<{ total: number }>(owner || adminSearch ? null : "/rules/count", { total: 0 });
   const showFilteredTotal = hasFilter || adminSearch;
-  const filteredRules = useData<{ total: number }>(showFilteredTotal ? "/rules/count?" + countFilters : null, { total: 0 });
+  const filteredRules = useData<{ total: number; owner?: number; serviceBlock?: string }>(showFilteredTotal ? "/rules/count?" + countFilters : null, { total: 0 });
+  const ownRules = !owner || owner === user.id;
+  const creationBlock = ownRules ? user.serviceBlock
+    : filteredRules.value.owner === owner ? filteredRules.value.serviceBlock : undefined;
+  const subscribed = hasPlan(user);
   const totals = showFilteredTotal ? filteredRules : allRules;
   const foldersPath = "/rules/folders" + (owner ? "?owner=" + owner : "");
   const folders = useData<{ name: string; count: number }[]>(foldersPath, []);
@@ -244,6 +232,9 @@ export default function Rules({ user, initialQuery, refreshUser, siteProbeInterv
     return group?.kind === "chain" && group.chain?.length ? group.chain : [id];
   }).map(id => groups.value.find(group => group.id === id));
   const requiresExit = (group?: Group) => group?.routing?.ingressMode === "relay" || group?.routing?.ingressMode === "personal";
+  const directEntry = chosenEntry?.routing?.ingressMode === "direct" || pureHAProxy;
+  const confirmWithoutPrimary = editing?.routeRepair?.path && !sharedTLS && !requiresExit(chosenEntry) && (directEntry || !rulePath?.length);
+  const confirmWithoutBackup = editing?.routeRepair?.backupPath && (directEntry || !backupPath?.length);
   function exitOptions(entry: Group | undefined, selected: number[] = []) {
     const previous = groups.value.find(group => group.id === selected.at(-1)) || entry;
     return hops.filter(({value}) => {
@@ -259,9 +250,10 @@ export default function Rules({ user, initialQuery, refreshUser, siteProbeInterv
       return true;
     });
   }
-  const describePath = (path: number[] | null) =>
-    path?.map((id) => names.get(id) || "#" + id).join(" → ") || "直出";
+  const describePath = (path: number[] | null, missing = false) =>
+    missing ? "未选择" : path?.map((id) => names.get(id) || "#" + id).join(" → ") || "直出";
   const connectionAddresses = (rule: Rule) => {
+    if (!rule.entry) return [];
     const raw = groups.value.find(group => group.id === rule.entry)?.connectHost || "";
     const port = String(rule.tlsSharedPort || rule.port);
     const hosts = raw.split("\n").map(host => host.trim()).filter(Boolean);
@@ -272,6 +264,7 @@ export default function Rules({ user, initialQuery, refreshUser, siteProbeInterv
     });
   };
   const describePort = (rule: Rule) => {
+    if (!rule.entry) return "—";
     const protocol = rule.tlsShared || rule.tlsSharedPort
       ? "共享 TLS"
       : rule.protocol === "haproxy-tcp" ? "HAProxy TCP"
@@ -310,7 +303,7 @@ export default function Rules({ user, initialQuery, refreshUser, siteProbeInterv
 
   function openImport() {
     importForm.resetFields();
-    setImporting("create");
+    setImporting(creationBlock ? "update" : "create");
   }
 
   function openReroute() {
@@ -320,12 +313,15 @@ export default function Rules({ user, initialQuery, refreshUser, siteProbeInterv
 
   function edit(rule?: Partial<Rule>) {
     const next = { ...defaults, owner: owner ?? undefined, ...rule };
-    setAdvanced(false);
-    clearPortCheck();
+    setAdvanced(Boolean(next.routeRepair?.backupPath));
+    setSaveError("");
     setEditing(next);
     form.resetFields();
     form.setFieldsValue({
       ...next,
+      entry: next.entry || undefined,
+      port: next.port || undefined,
+      confirmRoute: false,
       probeInterval: next.probeInterval ?? 0,
       targets: next.targets?.join("\n") ?? "",
       path: next.path ?? [],
@@ -346,49 +342,27 @@ export default function Rules({ user, initialQuery, refreshUser, siteProbeInterv
     };
   }
 
-  function clearPortCheck() {
-    portRequest.current?.abort();
-    setPortPreflight(undefined);
-    setPortError("");
-    setCheckingPort(false);
-  }
-
-  async function checkPort(page = 1) {
-    const values = await form.validateFields().catch(() => undefined);
-    if (!values) return;
-    portRequest.current?.abort();
-    const request = new AbortController();
-    portRequest.current = request;
-    setPortError("");
-    setCheckingPort(true);
-    try {
-      const result = await api<PortPreflight>(`/rules/preflight?page=${page}`, "POST", rulePayload(values), request.signal);
-      if (!request.signal.aborted) setPortPreflight(result);
-    } catch (error) {
-      if (!request.signal.aborted) {
-        setPortPreflight(undefined);
-        setPortError((error as Error).message);
-      }
-    } finally {
-      if (!request.signal.aborted) setCheckingPort(false);
-    }
-  }
-
   async function save(v: InputRule) {
+    if (saveRequest.current) return;
+    const request = new AbortController();
+    saveRequest.current = request;
+    setSaveError("");
     setBusy(true);
     try {
-      await api(
+      const rule = await api<Rule>(
         "/rules" + (editing?.id ? "/" + editing.id : ""),
         editing?.id ? "PUT" : "POST",
         rulePayload(v),
+        request.signal,
       );
-      clearPortCheck();
+      if (request.signal.aborted) return;
       setEditing(null);
       await reloadRules();
-      message.success("规则已保存");
+      message.success(editing?.id ? "规则已保存" : `规则已添加 · 监听端口 ${rule.tlsSharedPort || rule.port}`);
     } catch (e) {
-      message.error((e as Error).message);
+      if (!request.signal.aborted) setSaveError((e as Error).message);
     } finally {
+      saveRequest.current = null;
       setBusy(false);
     }
   }
@@ -618,10 +592,14 @@ export default function Rules({ user, initialQuery, refreshUser, siteProbeInterv
         </Space>
       </header>
       {!owner && !adminSearch && <dl className="rule-summary">
-        <div><dt>流量</dt><dd>{bytes(user.used)} / {user.quota ? bytes(user.quota) : "无限"}</dd></div>
-        <div><dt>到期</dt><dd>{user.admin ? "不限期" : date(user.expires)}</dd></div>
-        <div><dt>规则数</dt><dd>{allRules.value.total}{!user.admin && " / " + ruleLimitLabel(user)}</dd></div>
+        <div><dt>流量</dt><dd>{bytes(user.used)} / {subscribed && user.quota === 0 ? "无限" : bytes(subscribed ? user.quota : 0)}</dd></div>
+        <div><dt>到期</dt><dd>{planExpiryLabel(user)}</dd></div>
+        <div><dt>规则数</dt><dd>{allRules.value.total} / {ruleLimitLabel(user)}</dd></div>
       </dl>}
+      {creationBlock && <Alert className="alert-gap" type="info" showIcon message={creationBlock}
+        action={ownRules && (subscribed || showShop) && <Button size="small" href={subscribed ? "#/profile" : "#/shop"}>
+          {subscribed ? "前往续费" : "选购套餐"}
+        </Button>} />}
       {!ruleID && !adminSearch && <Tabs activeKey={label === undefined ? "all" : "folder:" + label} onChange={key => {
         setLabel(key === "all" ? undefined : key.slice(7));
         resetPage();
@@ -642,10 +620,10 @@ export default function Rules({ user, initialQuery, refreshUser, siteProbeInterv
       )}
         <div className="operator-toolbar">
           <Space size={[6, 7]} wrap className="operator-actions">
-            {!firstRule && <Button type="primary" icon={<Plus size={15} />} onClick={() => edit(owner ? { owner } : undefined)}>添加规则</Button>}
+            {!firstRule && <Button type="primary" icon={<Plus size={15} />} disabled={Boolean(creationBlock)} onClick={() => edit(owner ? { owner } : undefined)}>添加规则</Button>}
             {!narrow && <>
-              <Button onClick={() => setBulkAdd(true)}>批量添加</Button>
-              <Button icon={<Upload size={15} />} onClick={openImport}>批量导入</Button>
+              <Button disabled={Boolean(creationBlock)} onClick={() => setBulkAdd(true)}>批量添加</Button>
+              <Button icon={<Upload size={15} />} onClick={openImport}>{creationBlock ? "批量修改" : "批量导入"}</Button>
               <Dropdown.Button disabled={!selected.length} onClick={() => void copyRules()} menu={{
                 items: [{ key: "nyanpass", label: "复制 nyanpass JSON", onClick: () => void copyRules(true) }],
               }} trigger={["click"]}>批量导出</Dropdown.Button>
@@ -697,8 +675,8 @@ export default function Rules({ user, initialQuery, refreshUser, siteProbeInterv
             <Button aria-expanded={showSearch} onClick={() => setShowSearch(value => !value)}>高级筛选</Button>
             <Dropdown trigger={["click"]} menu={{ items: [
               ...(narrow ? [
-                { key: "bulk-add", label: "批量添加", onClick: () => setBulkAdd(true) },
-                { key: "bulk-import", label: "批量导入", onClick: openImport },
+                { key: "bulk-add", label: "批量添加", disabled: Boolean(creationBlock), onClick: () => setBulkAdd(true) },
+                { key: "bulk-import", label: creationBlock ? "批量修改" : "批量导入", onClick: openImport },
                 { key: "bulk-export", label: "批量导出", disabled: !selected.length, onClick: () => void copyRules() },
                 { key: "nyanpass", label: "复制 nyanpass JSON", disabled: !selected.length, onClick: () => void copyRules(true) },
                 { key: "bulk-switch", label: "批量切换", disabled: !selected.length, onClick: openReroute },
@@ -773,7 +751,7 @@ export default function Rules({ user, initialQuery, refreshUser, siteProbeInterv
             <div className="rule-empty">
               {!list.busy && (list.error ? <strong>规则加载失败</strong> : firstRule ? <>
                 <strong>还没有转发规则</strong>
-                <Button type="primary" icon={<Plus size={15} />} onClick={() => edit(owner ? { owner } : undefined)}>添加规则</Button>
+                <Button type="primary" icon={<Plus size={15} />} disabled={Boolean(creationBlock)} onClick={() => edit(owner ? { owner } : undefined)}>添加规则</Button>
               </> : <strong>{hasFilter || adminSearch ? "没有符合条件的规则" : "当前页没有规则"}</strong>)}
             </div>
           ) }}
@@ -803,9 +781,10 @@ export default function Rules({ user, initialQuery, refreshUser, siteProbeInterv
                   </div>
                   {narrow && (
                     <div className="muted mono">
-                      {names.get(r.entry) || r.entry} {describePort(r)}
+                      {r.entry ? names.get(r.entry) || r.entry : "入口未选择"} {describePort(r)}
                     </div>
                   )}
+                  {narrow && (r.routeRepair || r.runtime === "subscription_blocked") && <RuleStatus rule={r} />}
                   {adminSearch && narrow && <a className="data-secondary" href={"#/rules?owner=" + r.owner}>{r.ownerName || "UID " + r.owner}</a>}
                   {adminSearch && <a className="data-secondary" href={"#/rules?owner=" + r.owner + "&id=" + r.id}>定位规则</a>}
                 </>
@@ -817,7 +796,7 @@ export default function Rules({ user, initialQuery, refreshUser, siteProbeInterv
               responsive: ["md"],
               render: (_, r) => (
                 <>
-                  <span className="data-title">{names.get(r.entry) || r.entry}</span>
+                  <span className="data-title">{r.entry ? names.get(r.entry) || r.entry : "未选择"}</span>
                   <span className="data-secondary mono">{describePort(r)}</span>
                   {connectionAddresses(r).length > 1 && <Button type="link" size="small" onClick={() => setAddressRule(r)}>
                     {connectionAddresses(r).length} 个连接地址
@@ -833,10 +812,10 @@ export default function Rules({ user, initialQuery, refreshUser, siteProbeInterv
                 <>
                   {r.protocol === "haproxy-both" ? <>
                     <span className="data-title">TCP · HAProxy 直出</span>
-                    <span className="data-secondary">UDP · {describePath(r.path)}</span>
-                  </> : <span className="data-title">{r.tlsShared ? "按 SNI 分流" : r.protocol === "haproxy-tcp" ? "HAProxy 直出" : describePath(r.path)}</span>}
+                    <span className="data-secondary">UDP · {describePath(r.path, r.routeRepair?.path)}</span>
+                  </> : <span className="data-title">{r.tlsShared ? "按 SNI 分流" : r.protocol === "haproxy-tcp" ? "HAProxy 直出" : describePath(r.path, r.routeRepair?.path)}</span>}
                   <span className="data-secondary mono">{r.targets?.join(", ")}</span>
-                  {!!r.backupPath?.length && <span className="data-secondary">{r.protocol === "haproxy-both" ? "UDP 备用" : "备用"} · {describePath(r.backupPath)}</span>}
+                  {(!!r.backupPath?.length || r.routeRepair?.backupPath) && <span className="data-secondary">{r.protocol === "haproxy-both" ? "UDP 备用" : "备用"} · {describePath(r.backupPath, r.routeRepair?.backupPath)}</span>}
                 </>
               ),
             },
@@ -861,7 +840,7 @@ export default function Rules({ user, initialQuery, refreshUser, siteProbeInterv
               width: wide ? 236 : narrow ? 116 : 152,
               render: (_, r) => (
                 <Space className="row-actions" size={2} wrap={narrow}>
-                  {!narrow && <IconAction label={r.enabled ? "暂停规则" : "启动规则"}
+                  {!narrow && !r.routeRepair && <IconAction label={r.enabled ? "暂停规则" : "启动规则"}
                     icon={r.enabled ? <Pause size={15} /> : <Play size={15} />}
                     onClick={() => void batch(r.enabled ? "disable" : "enable", [r.id])} />}
                   <IconAction
@@ -870,13 +849,15 @@ export default function Rules({ user, initialQuery, refreshUser, siteProbeInterv
                     onClick={() => edit(r)}
                   />
                   <IconAction
-                    label="链路诊断"
+                    label={r.routeRepair ? "请先重新选择线路" : r.serviceBlock || "链路诊断"}
                     icon={<Activity size={15} />}
+                    disabled={Boolean(r.serviceBlock || r.routeRepair)}
                     onClick={() => setDiagnosticRule(r)}
                   />
                   {!narrow && <IconAction
-                    label="复制"
+                    label={r.routeRepair ? "请先重新选择线路" : r.serviceBlock || "复制"}
                     icon={<Copy size={14} />}
+                    disabled={Boolean(r.serviceBlock || r.routeRepair)}
                     onClick={() =>
                       edit({ ...r, id: 0, port: 0, name: r.name + " 副本" })
                     }
@@ -886,10 +867,10 @@ export default function Rules({ user, initialQuery, refreshUser, siteProbeInterv
                   {wide && <IconAction danger label="删除规则"
                     icon={<Trash2 size={15} />} onClick={() => deleteRule(r)} />}
                   <Dropdown trigger={["click"]} menu={{ items: [
-                    ...(narrow ? [{ key: "copy", label: "复制规则", onClick: () => edit({ ...r, id: 0, port: 0, name: r.name + " 副本" }) }] : []),
+                    ...(narrow ? [{ key: "copy", label: "复制规则", disabled: Boolean(r.serviceBlock || r.routeRepair), onClick: () => edit({ ...r, id: 0, port: 0, name: r.name + " 副本" }) }] : []),
                     { key: "advanced", label: "高级编辑", onClick: () => { edit(r); setAdvanced(true); } },
                     ...(!wide ? [{ key: "json", label: "编辑规则 JSON", onClick: () => setJsonRule(r) }] : []),
-                    ...(user.admin && (r.effectiveNetwork || r.protocol) !== "udp" ? [{ key: "haproxy", label: "生成 HAProxy 配置", icon: <Network size={14} />, onClick: () => {
+                    ...(user.admin && !r.routeRepair && (r.effectiveNetwork || r.protocol) !== "udp" ? [{ key: "haproxy", label: "生成 HAProxy 配置", icon: <Network size={14} />, onClick: () => {
                       setProxyConfig("");
                       setProxyRule(r);
                       proxyForm.setFieldsValue({ bind: "0.0.0.0:" + (r.tlsSharedPort || r.port), backends: "" });
@@ -897,7 +878,7 @@ export default function Rules({ user, initialQuery, refreshUser, siteProbeInterv
                     { key: "clear", label: "清空统计", onClick: () => confirmAction({ title: "清空本条规则的统计？", onOk: () => batch("clear", [r.id]) }) },
                     ...(!wide ? [{ key: "delete", label: "删除规则", danger: true, onClick: () => deleteRule(r) }] : []),
                   ] }}><IconAction label="规则更多操作" icon={<Ellipsis size={16} />} /></Dropdown>
-                  {narrow && <Switch
+                  {narrow && !r.routeRepair && <Switch
                     size="small"
                     checked={r.enabled}
                     aria-label="切换规则状态"
@@ -955,7 +936,8 @@ export default function Rules({ user, initialQuery, refreshUser, siteProbeInterv
           message.success("规则已保存");
           return true;
         }} />}
-      <Modal open={bulkAdd} title="批量添加规则" onCancel={() => setBulkAdd(false)} onOk={() => bulkForm.submit()} confirmLoading={busy} okText="添加">
+      <Modal open={bulkAdd} title="批量添加规则" onCancel={() => setBulkAdd(false)} onOk={() => bulkForm.submit()}
+        confirmLoading={busy} okText="添加" okButtonProps={{ disabled: Boolean(creationBlock) }}>
         <Form name="rule-batch" form={bulkForm} layout="vertical" onFinish={addRules}>
           <Form.Item name="entry" label="入口设备组" rules={[{ required: true }]}>
             <Select showSearch optionFilterProp="label" optionRender={renderGroupOption} options={entries} onChange={() => bulkForm.setFieldValue("path", [])} />
@@ -1019,14 +1001,14 @@ export default function Rules({ user, initialQuery, refreshUser, siteProbeInterv
             <div className="details-grid rule-details">
               <dl>
                 <dt>入口</dt>
-                <dd>{names.get(detail.entry) || detail.entry}<div className="mono">{describePort(detail)}</div></dd>
+                <dd>{detail.entry ? names.get(detail.entry) || detail.entry : "未选择"}<div className="mono">{describePort(detail)}</div></dd>
               </dl>
               <dl><dt>规则编号</dt><dd>#{detail.id}</dd></dl>
               {detail.protocol === "haproxy-tcp" || detail.protocol === "haproxy-both" ? <>
                 <dl><dt>TCP 路径</dt><dd>HAProxy 直连目标</dd></dl>
-                {detail.protocol === "haproxy-both" && <dl><dt>UDP 路径</dt><dd>{describePath(detail.path)}</dd></dl>}
-              </> : <dl><dt>出口</dt><dd>{describePath(detail.path)}</dd></dl>}
-              {!!detail.backupPath?.length && <dl><dt>{detail.protocol === "haproxy-both" ? "UDP 备用路径" : "备用链路"}</dt><dd>{describePath(detail.backupPath)}</dd></dl>}
+                {detail.protocol === "haproxy-both" && <dl><dt>UDP 路径</dt><dd>{describePath(detail.path, detail.routeRepair?.path)}</dd></dl>}
+              </> : <dl><dt>出口</dt><dd>{describePath(detail.path, detail.routeRepair?.path)}</dd></dl>}
+              {(!!detail.backupPath?.length || detail.routeRepair?.backupPath) && <dl><dt>{detail.protocol === "haproxy-both" ? "UDP 备用路径" : "备用链路"}</dt><dd>{describePath(detail.backupPath, detail.routeRepair?.backupPath)}</dd></dl>}
               <dl><dt>入站流量</dt><dd>{bytes(detail.in)}</dd></dl>
               <dl><dt>出站流量</dt><dd>{bytes(detail.out)}</dd></dl>
               <dl>
@@ -1066,38 +1048,23 @@ export default function Rules({ user, initialQuery, refreshUser, siteProbeInterv
       <Modal
         open={editing !== null}
         title={editing?.id ? "编辑规则" : "添加规则"}
-        onCancel={() => { clearPortCheck(); setEditing(null); }}
+        onCancel={() => { if (!saveRequest.current) setEditing(null); }}
         onOk={() => form.submit()}
         confirmLoading={busy}
         forceRender
         width={660}
-        okText="保存"
+        okText={busy && !editing?.id ? "检查端口并保存…" : "保存"}
         okButtonProps={{ "aria-label": "保存" }}
-        footer={(_, { CancelBtn, OkBtn }) => <>
-          <Button className="rule-preflight-trigger" loading={checkingPort} onClick={() => void checkPort()} disabled={busy}>
-            检查端口
-          </Button>
-          <CancelBtn /><OkBtn />
-        </>}
+        cancelButtonProps={{ disabled: busy }}
+        closable={!busy}
+        maskClosable={!busy}
       >
-        <Form name="rule-editor" form={form} layout="vertical" onFinish={save} onValuesChange={clearPortCheck} className="rule-editor">
-          {portError && <Alert className="alert-gap" showIcon type="error" message={portError} />}
-          {portPreflight && <section className="rule-preflight" aria-label="端口检查结果">
-            <header><strong>{portPreflight.network === "both" ? "TCP + UDP" : portPreflight.network.toUpperCase()} · {portPreflight.port}</strong><span>端口检查</span></header>
-            {portPreflight.mode === "panel" ? <p>面板校验通过，实际监听以入口应用结果为准。</p> :
-              !portPreflight.nodes.length ? <p>入口设备组暂无节点。</p> :
-                <ul>{portPreflight.nodes.map((node, index) => <li key={index}>
-                  <strong>{node.name}</strong>
-                  {node.bindings?.length ? <ul>{node.bindings.map(binding => <li key={binding.network + binding.address}>
-                    <code>{binding.network.toUpperCase()} {binding.address}</code>
-                    <Tag color={binding.status === "available" || binding.status === "in_use_by_rule" ? "success" : "warning"}>
-                      {portCheckLabels[binding.status] || "无法确认"}
-                    </Tag>
-                  </li>)}</ul> : <span className="muted">{portCheckLabels[node.status]}</span>}
-                </li>)}</ul>}
-            {portPreflight.total > portPreflight.pageSize && <Pagination simple size="small" disabled={checkingPort}
-              current={portPreflight.page} pageSize={portPreflight.pageSize} total={portPreflight.total} onChange={checkPort} />}
-          </section>}
+        <Form name="rule-editor" form={form} layout="vertical" onFinish={save} disabled={busy}
+          onValuesChange={() => { if (saveError) setSaveError(""); }} className="rule-editor">
+          {editing?.routeRepair && <Alert className="alert-gap" showIcon type="warning"
+            message="设备组权限已变更"
+            description="失去权限的线路已清空。选好可用线路并保存后，原来已启用的规则会恢复转发。" />}
+          {saveError && <Alert className="alert-gap" showIcon type="error" message={saveError} />}
           <div className="details-grid">
             <Form.Item name="name" label="名称" rules={[{ required: true }]}>
               <Input />
@@ -1111,7 +1078,10 @@ export default function Rules({ user, initialQuery, refreshUser, siteProbeInterv
               rules={[{ required: true }]}
             >
               <Select showSearch optionFilterProp="label" optionRender={renderGroupOption} options={entries}
-                placeholder="选择入口设备组" onChange={() => form.setFieldsValue({ path: [], backupPath: [] })} />
+                placeholder="选择入口设备组" onChange={() => {
+                  if (!editing?.routeRepair?.entry || ruleEntry) form.setFieldsValue({ path: [], backupPath: [] });
+                  form.setFieldValue("confirmRoute", false);
+                }} />
             </Form.Item>
             <Form.Item name="port" label={sharedPort ? "规则端口编号" : "监听端口"}>
               <InputNumber
@@ -1163,7 +1133,7 @@ export default function Rules({ user, initialQuery, refreshUser, siteProbeInterv
                 optionFilterProp="label"
                 optionRender={renderGroupOption}
                 options={exitOptions(chosenEntry, rulePath)}
-                placeholder={requiresExit(chosenEntry) ? "选择出口设备组" : "入口直出"}
+                placeholder={requiresExit(chosenEntry) || editing?.routeRepair?.path ? "选择出口设备组" : "入口直出"}
                 allowClear
               />
             </Form.Item>}
@@ -1186,6 +1156,9 @@ export default function Rules({ user, initialQuery, refreshUser, siteProbeInterv
                 </div>}
               </div>}
           </div>}
+          {chosenEntry && (confirmWithoutPrimary || confirmWithoutBackup) && <Form.Item name="confirmRoute" valuePropName="checked" preserve={false}>
+            <Checkbox>确认{[confirmWithoutPrimary && "由入口直出", confirmWithoutBackup && "取消备用出口"].filter(Boolean).join("并")}</Checkbox>
+          </Form.Item>}
           <Button className="editor-disclosure" type="text"
             icon={<ChevronDown size={15} className={advanced ? "rotate" : undefined} />}
             aria-expanded={advanced} aria-controls="rule-advanced" onClick={() => setAdvanced(!advanced)}>
@@ -1331,9 +1304,10 @@ export default function Rules({ user, initialQuery, refreshUser, siteProbeInterv
         onOk={() => importForm.submit()}
         confirmLoading={busy}
         okText={importing === "update" ? "更新规则" : "导入"}
+        okButtonProps={{ disabled: importing === "create" && Boolean(creationBlock) }}
       >
         <Form name="rule-import" form={importForm} layout="vertical" onFinish={importRules}>
-          <Button type="link" className="advanced-toggle" disabled={busy}
+          <Button type="link" className="advanced-toggle" disabled={busy || (importing === "update" && Boolean(creationBlock))}
             onClick={() => setImporting(importing === "update" ? "create" : "update")}>
             {importing === "update" ? "切换为批量新增" : "切换为批量修改"}
           </Button>

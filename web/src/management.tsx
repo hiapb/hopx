@@ -198,6 +198,11 @@ const planFields: Field[] = [
 ];
 const planLimitFields = new Set(["rules", "rateMbps", "maxIPs", "maxConnections"]);
 
+function authorizedUserGroups(group: Group) {
+  const ids = group.userGroups?.length ? group.userGroups : [group.userGroup];
+  return ids.filter(id => id > 0);
+}
+
 function PlanCard({ plan, actions, badge, sortControl, group, ...dragEvents }: {
   plan: Plan;
   actions: ReactNode;
@@ -531,10 +536,10 @@ export default function Management({ page, user, refresh }: Props) {
     {
       name: "userGroups",
       label: "授权用户组",
-      placeholder: "留空时允许全部用户组",
+      placeholder: "留空时不授权",
       kind: "multi",
       options: Array.isArray(groupUsers.value)
-        ? groupUsers.value.map((g) => ({ value: g.id, label: g.name }))
+        ? groupUsers.value.filter(g => g.id > 0).map(g => ({ value: g.id, label: g.name }))
         : [],
     },
     {
@@ -1485,12 +1490,12 @@ export default function Management({ page, user, refresh }: Props) {
               render: (v: number) => v / 1000 + "×",
             },
             {
-              title: "用户组",
+              title: "授权用户组",
               responsive: ["md"],
               render: (_: unknown, r: Group) => {
-                const ids = r.userGroups?.length ? r.userGroups : r.userGroup ? [r.userGroup] : [];
+                const ids = authorizedUserGroups(r);
                 const known = Array.isArray(groupUsers.value) ? groupUsers.value : [];
-                return ids.map((id) => known.find((g) => g.id === id)?.name ?? "#" + id).join("、") || "全部";
+                return ids.map((id) => known.find((g) => g.id === id)?.name ?? "#" + id).join("、") || "未授权";
               },
             },
             {
@@ -1531,7 +1536,7 @@ export default function Management({ page, user, refresh }: Props) {
                           ...r,
                           routing: { ...r.routing, statusVisibility: r.routing?.statusVisibility || (r.hideStatus ? "admin" : "all"),
                             ingressMode: r.routing?.ingressMode || "" },
-                          userGroups: r.userGroups?.length ? r.userGroups : r.userGroup ? [r.userGroup] : [],
+                          userGroups: authorizedUserGroups(r),
                         },
                       )
                     }

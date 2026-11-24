@@ -150,6 +150,12 @@ func (e *Engine) serveUDP(ctx context.Context, l *listener) {
 }
 
 func (e *Engine) forwardUDP(ctx context.Context, listen *net.UDPConn, source netip.AddrPort, s *udpSession, rr *ruleRuntime) {
+	if rr.lifetime != nil {
+		ctx = rr.lifetime
+	}
+	if ctx.Err() != nil {
+		return
+	}
 	target, backup, metered, err := rr.dialForward(ctx, "udp", source.Addr().String(), true)
 	if err != nil {
 		return
@@ -170,11 +176,17 @@ func (e *Engine) forwardUDP(ctx context.Context, listen *net.UDPConn, source net
 	var outgoing []byte
 	rr.recordRoute(&rr.lastUDPRoute, backup)
 	billing, counts := rr.billing(backup, metered)
+	if !counts.retain() {
+		return
+	}
+	defer counts.writers.Add(-1)
 	stop := context.AfterFunc(ctx, func() { target.Close() })
 	defer stop()
 	finished := make(chan struct{})
+	counts.writers.Add(1)
 	go func() {
 		defer close(finished)
+		defer counts.writers.Add(-1)
 		var reader udpSocketReader
 		socket := target
 		if tracked, ok := socket.(*loadConn); ok {
