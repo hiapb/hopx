@@ -59,12 +59,15 @@ function TrafficValue({ bandwidth, direction, online = true, node, narrow }: {
   narrow: boolean;
 }) {
   const rate = online ? speed(bandwidth[direction.rate]) : "—";
+  const [rateValue, unit] = rate.split(" ");
   const total = bandwidth.hasTotals ? bytes(bandwidth[direction.total]) : "—";
   return <Tooltip trigger={narrow ? ["click"] : ["hover", "focus"]} destroyOnHidden title={<div>
     <div>{direction.cumulative} {total}</div>
     {node && <div>连接数 · TCP {node.metrics.tcpConnections ?? 0} / UDP {node.metrics.udpSessions ?? 0}</div>}
   </div>}>
-    <button type="button" className="button-link probe-rate" aria-label={`${direction.label} ${rate}，${direction.cumulative} ${total}`}>{rate}</button>
+    <button type="button" className="button-link probe-rate" aria-label={`${direction.label} ${rate}，${direction.cumulative} ${total}`}>
+      {rateValue}{unit && <> <span className="probe-rate-unit">{unit}</span></>}
+    </button>
   </Tooltip>;
 }
 
@@ -113,7 +116,7 @@ type Sample = {
   out: number;
 };
 type Diagnostic = { status: string; detail: string; age: number };
-type NodeRollout = { version: string; name?: string; phase: string; reason?: string };
+type NodeRollout = { version: string; node?: number; name?: string; phase: string; reason?: string };
 
 export default function Nodes({ user, lookingGlass }: { user: User; lookingGlass: boolean }) {
   const screens = Grid.useBreakpoint();
@@ -321,6 +324,15 @@ export default function Nodes({ user, lookingGlass }: { user: User; lookingGlass
       : [];
   });
   const active = detail === undefined ? undefined : nodes[detail];
+  const rolloutNode = rollout?.node === undefined ? undefined : nodes[rollout.node];
+  const rolloutName = rolloutNode ? nodeDisplayName(rolloutNode) : rollout?.node && nodeDisplayName({
+    id: rollout.node,
+    name: rollout.name ?? "",
+  });
+  const rolloutReason = rollout?.reason?.trim();
+  const rolloutFailure = rolloutReason?.startsWith(`${rollout?.version}:`)
+    ? (/deadline exceeded|timeout/i.test(rolloutReason) ? "下载更新包超时" : "节点升级失败")
+    : rolloutReason;
   const historyPeak = history.reduce((peak, point) => Math.max(peak, point.in, point.out), 0);
   const bandwidth = sumBandwidth(visibleNodes);
   const summary = [
@@ -379,7 +391,7 @@ export default function Nodes({ user, lookingGlass }: { user: User; lookingGlass
       {
         title: "出口 IP",
         key: "address",
-        width: screens.xl ? "21%" : "16%",
+        width: screens.xl ? "18%" : "15%",
         shouldCellUpdate: (node: Node, previous: Node) =>
           node.address !== previous.address || node.ipv4 !== previous.ipv4 || node.ipv6 !== previous.ipv6,
         render: (_: unknown, node: Node) => renderAddresses(node) || "—",
@@ -387,14 +399,14 @@ export default function Nodes({ user, lookingGlass }: { user: User; lookingGlass
       {
         title: "状态",
         key: "status",
-        width: 52,
+        width: 56,
         render: (_: unknown, node: Node) => <NodeStatus online={node.online} />,
       },
     ] : []),
     ...trafficDirections.map(direction => ({
       title: direction.label,
       key: `${direction.rate}-${narrow ? "mobile" : "desktop"}`,
-      width: narrow ? "26%" : 84,
+      width: narrow ? "25%" : screens.xl ? 105 : 90,
       className: "probe-rate-cell",
       align: "right" as const,
       shouldCellUpdate: (node: Node, previous: Node) =>
@@ -409,14 +421,14 @@ export default function Nodes({ user, lookingGlass }: { user: User; lookingGlass
       ...resources.map(([metric, label]) => ({
         title: label,
         key: metric,
-        width: screens.xl ? "8.5%" : "6%",
+        width: screens.xl ? "8%" : "6%",
         shouldCellUpdate: (node: Node, previous: Node) => node.online !== previous.online || node.metrics[metric] !== previous.metrics[metric],
         render: (_: unknown, node: Node) => <ResourceMeter node={node} metric={metric} />,
       })),
       {
         title: "运行时长",
         key: "uptime",
-        width: 64,
+        width: 68,
         render: (_: unknown, node: Node) => node.online ? uptime(node.metrics.uptime) : "—",
       },
     ] : []),
@@ -424,7 +436,7 @@ export default function Nodes({ user, lookingGlass }: { user: User; lookingGlass
       title: "操作",
       key: "action",
       align: "right",
-      width: narrow ? 72 : 68,
+      width: narrow ? 72 : 76,
       render: (_, node) => renderActions(node.id),
     },
   ];
@@ -440,10 +452,19 @@ export default function Nodes({ user, lookingGlass }: { user: User; lookingGlass
       </header>
       {(groups.error || nodeError) && <Alert showIcon type="error" message={groups.error || nodeError} className="alert-gap" />}
       {user.admin && rollout?.version && ["updating", "checking", "paused"].includes(rollout.phase) &&
-        <Alert showIcon className="alert-gap" type={rollout.phase === "paused" ? "warning" : "info"}
-          message={`节点版本 ${rollout.version} · ${rollout.phase === "paused" ? "发布已暂停" : rollout.phase === "checking" ? "检查新节点版本" : "正在逐台升级"}`}
-          description={[rollout.name, rollout.reason].filter(Boolean).join(" · ")}
-          action={rollout.phase === "paused" && <Button size="small" loading={resumingRollout} onClick={() => void resumeRollout()}>跳过并继续</Button>} />}
+        <Alert showIcon className="alert-gap probe-rollout" type={rollout.phase === "paused" ? "warning" : "info"}
+          message={<div className="probe-rollout-message">
+            <strong>{rollout.phase === "paused" ? "节点发布已暂停" : rollout.phase === "checking" ? "正在检查节点状态" : "正在逐台升级"}</strong>
+            <span>{[rolloutName, rollout.version].filter(Boolean).join(" · ")}</span>
+            {rollout.phase === "paused" && rolloutFailure && (
+              rolloutFailure === rolloutReason ? <span>{rolloutFailure}</span> :
+                <details className="probe-rollout-error">
+                  <summary>{rolloutFailure}</summary>
+                  <p>{rolloutReason}</p>
+                </details>
+            )}
+          </div>}
+          action={rollout.phase === "paused" && <Button size="small" loading={resumingRollout} onClick={() => void resumeRollout()}>跳过此节点</Button>} />}
       <dl className="probe-overview">
         {summary.map(({ label, value, total, cumulative, icon: Icon }) => <div key={label}>
           <dt><Icon size={13} aria-hidden="true" />{label}</dt>

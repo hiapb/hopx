@@ -436,6 +436,12 @@ button:focus-visible, a:focus-visible { outline: 2px solid var(--accent); outlin
   background: var(--subtle);
   font-size: 12px;
 }
+.probe-page .probe-rollout.ant-alert { align-items: center; padding: 6px 10px; }
+.probe-rollout-message { display: flex; flex-wrap: wrap; gap: 1px 10px; overflow-wrap: anywhere; }
+.probe-rollout-message span { color: var(--muted); font-size: 13px; }
+.probe-rollout-error { color: var(--muted); font-size: 13px; }
+.probe-rollout-error summary { cursor: pointer; }
+.probe-rollout-error[open] { flex-basis: 100%; }
 .probe-overview {
   display: grid;
   grid-template-columns: repeat(4, minmax(0, 1fr));
@@ -496,33 +502,36 @@ button:focus-visible, a:focus-visible { outline: 2px solid var(--accent); outlin
 .probe-group-rates { display: flex; gap: 4px 16px; flex-wrap: wrap; }
 .probe-group-rates > div { display: flex; align-items: center; gap: 4px; color: var(--muted); font-size: 11px; }
 .probe-group-rates svg { color: var(--accent); flex: none; }
-.node-table .ant-table.ant-table-small .ant-table-tbody > tr > td { padding: 4px 6px; font-size: 12px; }
-.node-table .ant-table.ant-table-small .ant-table-thead > tr > th { padding: 5px 6px; font-size: 11px; white-space: nowrap; }
+.node-table .ant-table.ant-table-small .ant-table-tbody > tr > td { padding: 9px 8px; font-size: 14px; }
+.node-table .ant-table.ant-table-small .ant-table-thead > tr > th { padding: 9px 8px; font-size: 13px; white-space: nowrap; }
 .node-table .ant-table.ant-table-small tr > :first-child { padding-inline-start: 10px; }
 .node-table .ant-pagination { padding-inline: 12px; }
 .probe-group-empty { padding: 16px; color: var(--muted); font-size: 13px; }
 .probe-node { display: grid; justify-items: start; min-width: 0; }
-.probe-node .data-title { display: inline-flex; max-width: 100%; color: var(--text); font-weight: 660; }
+.probe-node .data-title { display: inline-flex; max-width: 100%; color: var(--text); font-size: 15px; font-weight: 680; }
 .probe-node .data-title > span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .probe-node .data-title:hover { color: var(--accent); }
 .node-name { display: inline-flex; align-items: center; gap: 7px; min-width: 0; overflow-wrap: anywhere; }
 .node-country-flag { width: 20px; height: 15px; flex: none; border-radius: 2px; outline: 1px solid var(--line); }
-.probe-status { display: inline-flex; align-items: center; gap: 4px; white-space: nowrap; color: var(--muted); font-size: 11px; }
+.probe-status { display: inline-flex; align-items: center; gap: 4px; white-space: nowrap; color: var(--muted); font-size: 13px; }
 .probe-status.online { color: var(--online); }
 .probe-status .status-dot { width: 5px; height: 5px; flex-basis: 5px; }
 .probe-addresses { display: grid; justify-items: start; gap: 0; min-width: 0; line-height: 1.35; overflow-wrap: anywhere; }
 .probe-addresses button { display: inline; max-width: 100%; color: var(--muted); }
+.node-table .probe-addresses .mono { font-size: 13px; }
 .probe-addresses svg { display: inline-block; margin-inline-start: 3px; vertical-align: middle; }
-.button-link.probe-rate { min-height: 24px; white-space: nowrap; color: var(--text); font-size: 11px; font-weight: 600; font-variant-numeric: tabular-nums; }
+.button-link.probe-rate { min-height: 28px; white-space: nowrap; color: var(--text); font-size: 14px; font-weight: 630; font-variant-numeric: tabular-nums; }
 .button-link.probe-rate:hover, .button-link.probe-rate:focus-visible { color: var(--accent); }
+.node-table .probe-rate { max-width: 100%; text-align: right; white-space: normal; line-height: 1.2; }
 .probe-resources { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 8px; margin: 0; }
 .probe-resources dd { margin: 0; }
-.probe-meter { position: relative; isolation: isolate; display: block; padding: 1px 4px; color: var(--text); font-size: 11px; font-weight: 650; font-variant-numeric: tabular-nums; }
+.probe-meter { position: relative; isolation: isolate; display: block; padding: 3px 6px; color: var(--text); font-size: 14px; font-weight: 650; font-variant-numeric: tabular-nums; white-space: nowrap; }
 .probe-track { position: absolute; z-index: -1; inset: 0; overflow: hidden; border-radius: 4px; background: var(--subtle); }
 .probe-track i { display: block; height: 100%; border-radius: inherit; background: color-mix(in srgb, var(--online) 30%, transparent); }
 .probe-track i.warn { background: var(--warning); }
 .probe-actions { display: flex; justify-content: flex-end; gap: 3px; }
 .probe-actions .ant-btn { color: var(--muted); }
+.node-table .probe-actions .ant-btn { width: 30px; height: 30px; }
 .probe-empty {
   display: grid;
   justify-items: center;
@@ -560,14 +569,20 @@ button:focus-visible, a:focus-visible { outline: 2px solid var(--accent); outlin
 .probe-history-legend span { display: flex; gap: 5px; align-items: center; }
 .probe-history-legend i, .probe-history-legend b { width: 8px; height: 8px; }
 .probe-history-legend small { margin-inline-start: auto; }
+@media (min-width: 992px) and (max-width: 1199px) {
+  .node-table .ant-table.ant-table-small tr > :is(th, td) { padding-inline: 4px; }
+  .node-table .probe-meter { padding-inline: 0; text-align: center; }
+}
 @media (max-width: 991px) {
   .probe-overview { grid-template-columns: repeat(2, minmax(0, 1fr)); }
   .probe-overview > div:nth-child(odd) { border-inline-start: 0; }
   .probe-overview > div:nth-child(n + 3) { border-top: 1px solid var(--line); }
   .node-table .probe-actions { gap: 0; }
-  .node-table .probe-actions .ant-btn { width: 30px; height: 30px; }
   .node-table .node-name { gap: 4px; }
-  .node-table .node-country-flag { width: 15px; height: 11px; }
+  .probe-node .data-title > span { display: -webkit-box; -webkit-box-orient: vertical; -webkit-line-clamp: 2; white-space: normal; }
+  .node-table .node-country-flag { width: 18px; height: 14px; }
+  .node-table .ant-table.ant-table-small .ant-table-tbody > tr > td { padding-block: 8px; font-size: 14px; }
+  .node-table .ant-table.ant-table-small .ant-table-thead > tr > th { padding-block: 8px; font-size: 13px; }
   .node-table .ant-table.ant-table-small tr > .probe-rate-cell { padding-inline: 2px; }
 }
 @media (max-width: 767px) {
@@ -577,11 +592,15 @@ button:focus-visible, a:focus-visible { outline: 2px solid var(--accent); outlin
   .probe-filters .ant-select { flex: 1 1 94px; max-width: none; }
   .node-head { gap: 0 10px; }
   .probe-group-rates { gap: 2px 8px; }
+  .probe-rate-unit { font-size: 11px; font-weight: 550; }
 }
 @media (max-width: 355px) {
   .probe-filters { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); }
   .probe-filters .ant-input-affix-wrapper { grid-column: 1 / -1; width: 100%; }
   .probe-filters .ant-select { min-width: 0; }
+  .probe-group-rates { flex-wrap: nowrap; }
+  .probe-group-rates .probe-rate { font-size: 13px; }
+  .node-table .probe-rate-unit { display: block; }
 }
 
 .section-title { margin-bottom: 12px; }
