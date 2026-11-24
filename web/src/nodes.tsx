@@ -1,5 +1,6 @@
 import { useEffect, useMemo, useState } from "react";
-import { Alert, App, Button, Drawer, Grid, Input, InputNumber, Select, Space, Spin, Table } from "antd";
+import { Alert, App, Button, Drawer, Grid, Input, InputNumber, Select, Space, Spin, Table, Tooltip } from "antd";
+import type { TableColumnsType } from "antd";
 import {
   Activity,
   ArrowDown,
@@ -17,7 +18,8 @@ import IconAction from "./icon-action";
 import { NodeFlag, nodeDisplayName, nodeRegion } from "./node-location";
 
 const speed = (mbps: number) =>
-  mbps >= 1 ? mbps.toFixed(2) + " Mbps" : (mbps * 1000).toFixed(1) + " Kbps";
+  mbps >= 1000 ? (mbps / 1000).toFixed(2) + " Gbps" :
+    mbps >= 1 ? mbps.toFixed(2) + " Mbps" : (mbps * 1000).toFixed(1) + " Kbps";
 const uptime = (sec: number) => {
   const days = Math.floor(sec / 86400);
   return days > 0
@@ -25,34 +27,63 @@ const uptime = (sec: number) => {
     : new Date(Math.max(sec, 0) * 1000).toISOString().slice(11, 19);
 };
 const resources = [["cpu", "CPU"], ["ram", "内存"], ["disk", "磁盘"]] as const;
+const trafficDirections = [
+  { label: "上行", rate: "outMbps", total: "outBytes", cumulative: "累计上传", Icon: ArrowUp },
+  { label: "下行", rate: "inMbps", total: "inBytes", cumulative: "累计下载", Icon: ArrowDown },
+] as const;
+type TrafficDirection = (typeof trafficDirections)[number];
+
+function ResourceMeter({ node, metric }: { node: Node; metric: (typeof resources)[number][0] }) {
+  const percent = Math.max(0, Math.min(100, Math.round(node.metrics[metric] || 0)));
+  return <span className="probe-meter">
+    <span aria-hidden="true" className="probe-track">
+      <i className={percent >= 80 && node.online ? "warn" : undefined} style={{ width: (node.online ? percent : 0) + "%" }} />
+    </span>
+    <span>{node.online ? percent + "%" : "—"}</span>
+  </span>;
+}
 
 function ResourceUsage({ node }: { node: Node }) {
   return <dl className="probe-resources">
-    {resources.map(([key, label]) => {
-      const percent = Math.max(0, Math.min(100, Math.round(node.metrics[key] || 0)));
-      return <div key={key}>
-        <dt>{label}</dt><dd>{node.online ? percent + "%" : "—"}</dd>
-        <span aria-hidden="true" className="probe-track">
-          <i className={percent >= 80 && node.online ? "warn" : undefined} style={{ width: (node.online ? percent : 0) + "%" }} />
-        </span>
-      </div>;
-    })}
+    {resources.map(([key, label]) => <div key={key}>
+      <dt>{label}</dt><dd><ResourceMeter node={node} metric={key} /></dd>
+    </div>)}
   </dl>;
+}
+
+function TrafficValue({ bandwidth, direction, online = true, node, narrow }: {
+  bandwidth: NodeBandwidth;
+  direction: TrafficDirection;
+  online?: boolean;
+  node?: Node;
+  narrow: boolean;
+}) {
+  const rate = online ? speed(bandwidth[direction.rate]) : "—";
+  const total = bandwidth.hasTotals ? bytes(bandwidth[direction.total]) : "—";
+  return <Tooltip trigger={narrow ? ["click"] : ["hover", "focus"]} destroyOnHidden title={<div>
+    <div>{direction.cumulative} {total}</div>
+    {node && <div>连接数 · TCP {node.metrics.tcpConnections ?? 0} / UDP {node.metrics.udpSessions ?? 0}</div>}
+  </div>}>
+    <button type="button" className="button-link probe-rate" aria-label={`${direction.label} ${rate}，${direction.cumulative} ${total}`}>{rate}</button>
+  </Tooltip>;
 }
 
 function TrafficRates({ bandwidth, online = true }: { bandwidth: NodeBandwidth; online?: boolean }) {
   return <dl className="node-speeds">
-    {[
-      { label: "上行", rate: bandwidth.outMbps, total: bandwidth.outBytes, Icon: ArrowUp },
-      { label: "下行", rate: bandwidth.inMbps, total: bandwidth.inBytes, Icon: ArrowDown },
-    ].map(({ label, rate, total, Icon }) => <div key={label}>
+    {trafficDirections.map(({ label, rate, total, Icon }) => <div key={label}>
       <dt><Icon size={13} aria-hidden="true" />{label}</dt>
       <dd>
-        <strong>{online ? speed(rate) : "—"}</strong>
-        <span>累计 {bandwidth.hasTotals ? bytes(total) : "—"}</span>
+        <strong>{online ? speed(bandwidth[rate]) : "—"}</strong>
+        <span>累计 {bandwidth.hasTotals ? bytes(bandwidth[total]) : "—"}</span>
       </dd>
     </div>)}
   </dl>;
+}
+
+function NodeStatus({ online }: { online: boolean }) {
+  return <span className={online ? "probe-status online" : "probe-status"}>
+    <i aria-hidden="true" className={online ? "status-dot online" : "status-dot"} />{online ? "在线" : "离线"}
+  </span>;
 }
 
 function sumBandwidth(nodes: Node[]) {
@@ -85,7 +116,8 @@ type Diagnostic = { status: string; detail: string; age: number };
 type NodeRollout = { version: string; name?: string; phase: string; reason?: string };
 
 export default function Nodes({ user, lookingGlass }: { user: User; lookingGlass: boolean }) {
-  const narrow = Grid.useBreakpoint().lg === false;
+  const screens = Grid.useBreakpoint();
+  const narrow = !screens.lg;
   const { message } = App.useApp();
   const [rollout, setRollout] = useState<NodeRollout>();
   const [resumingRollout, setResumingRollout] = useState(false);
@@ -294,8 +326,8 @@ export default function Nodes({ user, lookingGlass }: { user: User; lookingGlass
   const summary = [
     { label: "在线节点", value: onlineNodes.length, total: visibleNodes.length, icon: Server },
     { label: "离线节点", value: visibleNodes.length - onlineNodes.length, icon: Activity },
-    { label: "实时上行", value: speed(bandwidth.outMbps), cumulative: bandwidth.hasTotals ? bytes(bandwidth.outBytes) : "—", icon: ArrowUp },
-    { label: "实时下行", value: speed(bandwidth.inMbps), cumulative: bandwidth.hasTotals ? bytes(bandwidth.inBytes) : "—", icon: ArrowDown },
+    { label: "上行", value: speed(bandwidth.outMbps), cumulative: bandwidth.hasTotals ? bytes(bandwidth.outBytes) : "—", icon: ArrowUp },
+    { label: "下行", value: speed(bandwidth.inMbps), cumulative: bandwidth.hasTotals ? bytes(bandwidth.inBytes) : "—", icon: ArrowDown },
   ];
 
   function showDetails(id: number) {
@@ -322,6 +354,81 @@ export default function Nodes({ user, lookingGlass }: { user: User; lookingGlass
     </div>;
   }
 
+  function renderActions(id: number) {
+    return <div className="probe-actions">
+      <IconAction label="诊断" icon={<Stethoscope size={16} />} onClick={() => void diagnose(id)} />
+      <IconAction label="详情" icon={<ChevronRight size={17} />} onClick={() => showDetails(id)} />
+    </div>;
+  }
+
+  const columns: TableColumnsType<Node> = [
+    {
+      title: narrow ? "节点" : "节点 / 地区",
+      key: "name",
+      render: (_, node) => {
+        const name = nodeDisplayName(node);
+        return <div className="probe-node">
+          <button type="button" className="button-link data-title node-name" title={name} onClick={() => showDetails(node.id)}>
+            <NodeFlag node={node} /><span>{name}</span>
+          </button>
+          {narrow && <NodeStatus online={node.online} />}
+        </div>;
+      },
+    },
+    ...(!narrow ? [
+      {
+        title: "出口 IP",
+        key: "address",
+        width: screens.xl ? "21%" : "16%",
+        shouldCellUpdate: (node: Node, previous: Node) =>
+          node.address !== previous.address || node.ipv4 !== previous.ipv4 || node.ipv6 !== previous.ipv6,
+        render: (_: unknown, node: Node) => renderAddresses(node) || "—",
+      },
+      {
+        title: "状态",
+        key: "status",
+        width: 52,
+        render: (_: unknown, node: Node) => <NodeStatus online={node.online} />,
+      },
+    ] : []),
+    ...trafficDirections.map(direction => ({
+      title: direction.label,
+      key: `${direction.rate}-${narrow ? "mobile" : "desktop"}`,
+      width: narrow ? "26%" : 84,
+      className: "probe-rate-cell",
+      align: "right" as const,
+      shouldCellUpdate: (node: Node, previous: Node) =>
+        node.online !== previous.online || node.metrics[direction.rate] !== previous.metrics[direction.rate] ||
+        node.metrics[direction.total] !== previous.metrics[direction.total] ||
+        node.metrics.hasTotals !== previous.metrics.hasTotals ||
+        node.metrics.tcpConnections !== previous.metrics.tcpConnections ||
+        node.metrics.udpSessions !== previous.metrics.udpSessions,
+      render: (_: unknown, node: Node) => <TrafficValue bandwidth={node.metrics} direction={direction} online={node.online} node={node} narrow={narrow} />,
+    })),
+    ...(!narrow ? [
+      ...resources.map(([metric, label]) => ({
+        title: label,
+        key: metric,
+        width: screens.xl ? "8.5%" : "6%",
+        shouldCellUpdate: (node: Node, previous: Node) => node.online !== previous.online || node.metrics[metric] !== previous.metrics[metric],
+        render: (_: unknown, node: Node) => <ResourceMeter node={node} metric={metric} />,
+      })),
+      {
+        title: "运行时长",
+        key: "uptime",
+        width: 64,
+        render: (_: unknown, node: Node) => node.online ? uptime(node.metrics.uptime) : "—",
+      },
+    ] : []),
+    {
+      title: "操作",
+      key: "action",
+      align: "right",
+      width: narrow ? 72 : 68,
+      render: (_, node) => renderActions(node.id),
+    },
+  ];
+
   return (
     <section className="panel-table probe-page">
       <header className="page-head">
@@ -339,7 +446,7 @@ export default function Nodes({ user, lookingGlass }: { user: User; lookingGlass
           action={rollout.phase === "paused" && <Button size="small" loading={resumingRollout} onClick={() => void resumeRollout()}>跳过并继续</Button>} />}
       <dl className="probe-overview">
         {summary.map(({ label, value, total, cumulative, icon: Icon }) => <div key={label}>
-          <dt><Icon size={16} aria-hidden="true" />{label}</dt>
+          <dt><Icon size={13} aria-hidden="true" />{label}</dt>
           <dd>{loading || (!received && nodeError) ? "—" : value}
             {!loading && received && total !== undefined && <small> / {total}</small>}
           </dd>
@@ -349,7 +456,7 @@ export default function Nodes({ user, lookingGlass }: { user: User; lookingGlass
       <div className="probe-filters">
         <Input
           aria-label="搜索节点"
-          placeholder="搜索节点、地区或地址"
+          placeholder={narrow ? "搜索" : "搜索节点"}
           prefix={<Search size={15} />}
           allowClear
           value={search}
@@ -359,7 +466,7 @@ export default function Nodes({ user, lookingGlass }: { user: User; lookingGlass
           aria-label="设备组"
           value={group}
           allowClear
-          placeholder="全部设备组"
+          placeholder={narrow ? "设备组" : "全部设备组"}
           options={visibleGroups.map(g => ({ value: g.id, label: g.folder ? g.folder + " / " + g.name : g.name }))}
           onChange={setGroup}
         />
@@ -383,6 +490,7 @@ export default function Nodes({ user, lookingGlass }: { user: User; lookingGlass
         <div className="node-grid">
           {shown.map(({ group: g, all, matches }) => {
             const running = all.filter(node => node.online);
+            const totals = sumBandwidth(all);
             return (
               <section className="node-section" key={g.id} aria-labelledby={"node-group-" + g.id}>
                 <header className="node-head">
@@ -394,80 +502,22 @@ export default function Nodes({ user, lookingGlass }: { user: User; lookingGlass
                     </div>
                     <span className="node-count">{running.length} / {all.length} 在线</span>
                   </div>
-                  {all.length > 0 && <TrafficRates bandwidth={sumBandwidth(all)} />}
+                  {all.length > 0 && <div className="probe-group-rates">
+                    {trafficDirections.map(direction => <div key={direction.rate}>
+                      <direction.Icon size={12} aria-hidden="true" />
+                      <span className="probe-group-rate-label">总{direction.label}</span>
+                      <TrafficValue bandwidth={totals} direction={direction} narrow={narrow} />
+                    </div>)}
+                  </div>}
                 </header>
                 {matches.length > 0 ? <Table<Node>
                   className="node-table"
-                  size="middle"
+                  size="small"
                   rowKey="id"
-                  showHeader={!narrow}
+                  tableLayout="fixed"
                   dataSource={matches}
                   pagination={matches.length > 25 ? { pageSize: 25, hideOnSinglePage: true, size: "small" } : false}
-                  columns={[
-                    {
-                      title: "节点",
-                      key: "name",
-                      width: narrow ? undefined : "23%",
-                      render: (_, node) => (
-                        <div className="probe-node">
-                          <div className="probe-node-heading">
-                            <button type="button" className="button-link data-title node-name" onClick={() => showDetails(node.id)}>
-                              <NodeFlag node={node} />
-                              <span>{nodeDisplayName(node)}</span>
-                            </button>
-                            <span className={node.online ? "probe-status online" : "probe-status"}>
-                              <i aria-hidden="true" className={node.online ? "status-dot online" : "status-dot"} />{node.online ? "在线" : "离线"}
-                            </span>
-                          </div>
-                          {(node.region || node.online) && <p className="data-secondary">
-                            {[node.region, node.online ? "运行 " + uptime(node.metrics.uptime) : ""].filter(Boolean).join(" · ")}
-                          </p>}
-                          {narrow && <div className="probe-mobile-metrics">
-                            {renderAddresses(node)}
-                            <TrafficRates bandwidth={node.metrics} online={node.online} />
-                            <ResourceUsage node={node} />
-                          </div>}
-                          {narrow && <div className="probe-actions">
-                            <Button size="small" type="text" icon={<Stethoscope size={14} />} onClick={() => void diagnose(node.id)}>诊断</Button>
-                            <Button size="small" type="text" icon={<ChevronRight size={15} />} onClick={() => showDetails(node.id)}>详情</Button>
-                          </div>}
-                        </div>
-                      ),
-                    },
-                    ...(!narrow ? [
-                      {
-                        title: "出口 IP",
-                        key: "address",
-                        width: "21%",
-                        shouldCellUpdate: (node: Node, previous: Node) =>
-                          node.address !== previous.address || node.ipv4 !== previous.ipv4 || node.ipv6 !== previous.ipv6,
-                        render: (_: unknown, node: Node) => renderAddresses(node) || "—",
-                      },
-                      {
-                        title: "实时带宽 / 累计流量",
-                        key: "traffic",
-                        width: "24%",
-                        render: (_: unknown, node: Node) => <TrafficRates bandwidth={node.metrics} online={node.online} />,
-                      },
-                      {
-                        title: "资源占用",
-                        key: "resources",
-                        width: "24%",
-                        shouldCellUpdate: (node: Node, previous: Node) => node.online !== previous.online ||
-                          resources.some(([key]) => node.metrics[key] !== previous.metrics[key]),
-                        render: (_: unknown, node: Node) => <ResourceUsage node={node} />,
-                      },
-                      {
-                        title: "操作",
-                        key: "action",
-                        align: "right" as const,
-                        render: (_: unknown, node: Node) => <div className="probe-actions">
-                          <IconAction label="诊断" icon={<Stethoscope size={16} />} onClick={() => void diagnose(node.id)} />
-                          <IconAction label="详情" icon={<ChevronRight size={17} />} onClick={() => showDetails(node.id)} />
-                        </div>,
-                      },
-                    ] : []),
-                  ]}
+                  columns={columns}
                 /> : <p className="probe-group-empty">此设备组暂无节点</p>}
               </section>
             );
@@ -519,9 +569,11 @@ export default function Nodes({ user, lookingGlass }: { user: User; lookingGlass
             </dl>
             <dl>
               <dt>出口 IP</dt>
-              <dd className="mono">
-                {([active.ipv4, active.ipv6].filter(Boolean).join(" / ") || active.address || "—")}
-              </dd>
+              <dd>{renderAddresses(active) || "—"}</dd>
+            </dl>
+            <dl>
+              <dt>运行时长</dt>
+              <dd>{active.online ? uptime(active.metrics.uptime) : "—"}</dd>
             </dl>
             <dl>
               <dt>运行版本</dt>
