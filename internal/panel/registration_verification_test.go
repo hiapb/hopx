@@ -38,8 +38,21 @@ func TestRegistrationVerificationSettings(t *testing.T) {
 		Left, Right int
 	}
 	testRequest(t, guest, "GET", url+"/register/challenge", nil, nil, 200, &question)
+	for _, tc := range []struct{ password, message string }{
+		{"", "请输入密码"},
+		{"abc123456", "密码太短，至少需要 10 字节（当前 9 字节）"},
+		{strings.Repeat("密", 25), "密码太长，最多允许 72 字节（当前 75 字节）"},
+	} {
+		var result map[string]string
+		testRequest(t, guest, "POST", url+"/register", nil, map[string]any{
+			"name": "arithmetic-user", "password": tc.password, "challengeId": question.ID, "answer": question.Left + question.Right,
+		}, 400, &result)
+		if result["error"] != tc.message {
+			t.Fatalf("registration error = %q, want %q", result["error"], tc.message)
+		}
+	}
 	testRequest(t, guest, "POST", url+"/register", nil, map[string]any{
-		"name": "arithmetic-user", "password": "test-password-123", "challengeId": question.ID, "answer": question.Left + question.Right,
+		"name": "arithmetic-user", "password": strings.Repeat("密", 24), "challengeId": question.ID, "answer": question.Left + question.Right,
 	}, 201, nil)
 	testRequest(t, admin, "PUT", url+"/admin/settings", nil, map[string]string{
 		"registrationVerification": verificationTurnstile,

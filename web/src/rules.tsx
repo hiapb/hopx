@@ -573,6 +573,23 @@ export default function Rules({ user, initialQuery, refreshUser, siteProbeInterv
     }
   }
 
+  const listActions = <>
+    <Button aria-expanded={showSearch} onClick={() => setShowSearch(value => !value)}>高级筛选</Button>
+    <Dropdown trigger={["click"]} menu={{ items: [
+      ...(narrow ? [
+        { key: "bulk-add", label: "批量添加", disabled: Boolean(creationBlock), onClick: () => setBulkAdd(true) },
+        { key: "bulk-import", label: creationBlock ? "批量修改" : "批量导入", onClick: openImport },
+        { key: "bulk-export", label: "批量导出", disabled: !selected.length, onClick: () => void copyRules() },
+        { key: "nyanpass", label: "复制 nyanpass JSON", disabled: !selected.length, onClick: () => void copyRules(true) },
+        { key: "bulk-switch", label: "批量切换", disabled: !selected.length, onClick: openReroute },
+      ] : []),
+      { key: "download", label: selected.length ? "下载选中" : "下载筛选结果", icon: <Download size={15} />, onClick: () => selected.length
+        ? exportRules(list.value.filter(row => selected.includes(row.id))) : void exportFiltered() },
+      ...(!ruleID && !adminSearch ? [{ key: "new-folder", label: "新增分组", onClick: () => editFolder("create") }] : []),
+      ...(!ruleID && !adminSearch && (!user.admin || owner !== null) ? [{ key: "folders", label: "管理分组", disabled: !folders.value.some(folder => folder.name), onClick: () => editFolder("rename") }] : []),
+    ] }}><Button loading={exporting} icon={<Ellipsis size={17} />}>列表操作</Button></Dropdown>
+  </>;
+
   return (
     <>
       <section className="table-section panel-table rules-table">
@@ -582,7 +599,7 @@ export default function Rules({ user, initialQuery, refreshUser, siteProbeInterv
           {owner && <p>用户 UID {owner}</p>}
           {ruleID && <p>规则 ID {ruleID} · <a href={owner ? "#/rules?owner=" + owner : "#/rules"}>查看全部规则</a></p>}
         </div>
-        <Space wrap>
+        <Space wrap={!narrow}>
           {adminSearch && <Button href="#/users">返回用户管理</Button>}
           {!owner && !adminSearch && <Button onClick={async () => {
             try { setStatistics(await api("/rules/statistics")); }
@@ -619,7 +636,7 @@ export default function Rules({ user, initialQuery, refreshUser, siteProbeInterv
         />
       )}
         <div className="operator-toolbar">
-          <Space size={[6, 7]} wrap className="operator-actions">
+          <Space size={[6, 7]} wrap={!narrow} className="operator-actions">
             {!firstRule && <Button type="primary" icon={<Plus size={15} />} disabled={Boolean(creationBlock)} onClick={() => edit(owner ? { owner } : undefined)}>添加规则</Button>}
             {!narrow && <>
               <Button disabled={Boolean(creationBlock)} onClick={() => setBulkAdd(true)}>批量添加</Button>
@@ -629,8 +646,9 @@ export default function Rules({ user, initialQuery, refreshUser, siteProbeInterv
               }} trigger={["click"]}>批量导出</Dropdown.Button>
               <Button icon={<ArrowRightLeft size={15} />} disabled={!selected.length} onClick={openReroute}>批量切换</Button>
             </>}
+            {narrow && listActions}
           </Space>
-          <Space wrap className="operator-filters rule-filters">
+          <Space wrap={!narrow} className="operator-filters rule-filters">
             <Input
               aria-label="搜索规则"
               placeholder="搜索规则"
@@ -672,20 +690,7 @@ export default function Rules({ user, initialQuery, refreshUser, siteProbeInterv
               ]}
               onChange={value => sortRules(value)}
             />
-            <Button aria-expanded={showSearch} onClick={() => setShowSearch(value => !value)}>高级筛选</Button>
-            <Dropdown trigger={["click"]} menu={{ items: [
-              ...(narrow ? [
-                { key: "bulk-add", label: "批量添加", disabled: Boolean(creationBlock), onClick: () => setBulkAdd(true) },
-                { key: "bulk-import", label: creationBlock ? "批量修改" : "批量导入", onClick: openImport },
-                { key: "bulk-export", label: "批量导出", disabled: !selected.length, onClick: () => void copyRules() },
-                { key: "nyanpass", label: "复制 nyanpass JSON", disabled: !selected.length, onClick: () => void copyRules(true) },
-                { key: "bulk-switch", label: "批量切换", disabled: !selected.length, onClick: openReroute },
-              ] : []),
-              { key: "download", label: selected.length ? "下载选中" : "下载筛选结果", icon: <Download size={15} />, onClick: () => selected.length
-                ? exportRules(list.value.filter(row => selected.includes(row.id))) : void exportFiltered() },
-              ...(!ruleID && !adminSearch ? [{ key: "new-folder", label: "新增分组", onClick: () => editFolder("create") }] : []),
-              ...(!ruleID && !adminSearch && (!user.admin || owner !== null) ? [{ key: "folders", label: "管理分组", disabled: !folders.value.some(folder => folder.name), onClick: () => editFolder("rename") }] : []),
-            ] }}><Button loading={exporting} icon={<Ellipsis size={17} />}>列表操作</Button></Dropdown>
+            {!narrow && listActions}
           </Space>
         </div>
         {showSearch && <Form name="rule-search" form={searchForm} layout="vertical" className="rule-search-form" onFinish={(values) => {
@@ -706,7 +711,7 @@ export default function Rules({ user, initialQuery, refreshUser, siteProbeInterv
           </Space>
         </Form>}
         {selected.length > 0 && (
-          <Space wrap className="batch-toolbar">
+          <Space wrap={!narrow} className="batch-toolbar">
             <span className="selection-count">已选 {selected.length} 条</span>
             <Button size="small" onClick={() => void batch("enable")}>
               批量启动
@@ -758,7 +763,8 @@ export default function Rules({ user, initialQuery, refreshUser, siteProbeInterv
           rowKey="id"
           dataSource={list.value}
           pagination={false}
-          scroll={narrow ? undefined : { x: adminSearch ? 980 : 870 }}
+          showHeader={!narrow || list.value.length > 0}
+          scroll={narrow && !list.value.length ? undefined : { x: adminSearch ? 980 : 870 }}
           onChange={(_, __, sorter, extra) => {
             if (extra.action !== "sort") return;
             const active = Array.isArray(sorter) ? sorter[0] : sorter;
@@ -766,7 +772,7 @@ export default function Rules({ user, initialQuery, refreshUser, siteProbeInterv
           }}
           rowSelection={{ selectedRowKeys: selected, onChange: setSelected }}
           columns={[
-            ...(adminSearch && !narrow ? [{ title: "用户", key: "owner", width: 130, render: (_: unknown, rule: Rule) => (
+            ...(adminSearch ? [{ title: "用户", key: "owner", width: 130, render: (_: unknown, rule: Rule) => (
               <a href={"#/rules?owner=" + rule.owner}>{rule.ownerName || "UID " + rule.owner}</a>
             ) }] : []),
             {
@@ -779,13 +785,6 @@ export default function Rules({ user, initialQuery, refreshUser, siteProbeInterv
                     #{r.id}
                     {r.label ? " · " + r.label : ""}
                   </div>
-                  {narrow && (
-                    <div className="muted mono">
-                      {r.entry ? names.get(r.entry) || r.entry : "入口未选择"} {describePort(r)}
-                    </div>
-                  )}
-                  {narrow && (r.routeRepair || r.runtime === "subscription_blocked") && <RuleStatus rule={r} />}
-                  {adminSearch && narrow && <a className="data-secondary" href={"#/rules?owner=" + r.owner}>{r.ownerName || "UID " + r.owner}</a>}
                   {adminSearch && <a className="data-secondary" href={"#/rules?owner=" + r.owner + "&id=" + r.id}>定位规则</a>}
                 </>
               ),
@@ -793,7 +792,6 @@ export default function Rules({ user, initialQuery, refreshUser, siteProbeInterv
             {
               title: "入口",
               ...sortable("entry"),
-              responsive: ["md"],
               render: (_, r) => (
                 <>
                   <span className="data-title">{r.entry ? names.get(r.entry) || r.entry : "未选择"}</span>
@@ -807,7 +805,6 @@ export default function Rules({ user, initialQuery, refreshUser, siteProbeInterv
             {
               title: "出口 / 目标",
               ...sortable("exit"),
-              responsive: ["md"],
               render: (_, r) => (
                 <>
                   {r.protocol === "haproxy-both" ? <>
@@ -822,7 +819,6 @@ export default function Rules({ user, initialQuery, refreshUser, siteProbeInterv
             {
               title: "已用流量",
               ...sortable("traffic"),
-              responsive: ["md"],
               align: "right",
               render: (_, r) => (
                 <span className="mono">{((r.in + r.out) / 2 ** 30).toFixed(2)} GiB</span>
@@ -831,15 +827,14 @@ export default function Rules({ user, initialQuery, refreshUser, siteProbeInterv
             {
               title: "状态",
               key: "status",
-              responsive: ["md"],
               render: (_, r) => <RuleStatus rule={r} />,
             },
             {
               title: "操作",
               key: "actions",
-              width: wide ? 236 : narrow ? 116 : 152,
+              width: wide ? 236 : 152,
               render: (_, r) => (
-                <Space className="row-actions" size={2} wrap={narrow}>
+                <Space className="row-actions" size={2}>
                   {!narrow && !r.routeRepair && <IconAction label={r.enabled ? "暂停规则" : "启动规则"}
                     icon={r.enabled ? <Pause size={15} /> : <Play size={15} />}
                     onClick={() => void batch(r.enabled ? "disable" : "enable", [r.id])} />}

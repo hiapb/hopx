@@ -122,6 +122,78 @@ func (s *Server) pollDiagnostic(id int64, result *wire.DiagnosticResult) *wire.D
 	return nil
 }
 
+func connectivityRuleStatus(node wire.Device, group wire.DeviceGroup, rule wire.Rule, admin bool) (int, string) {
+	switch {
+	case len(rule.Targets) == 0 || !targetOK(rule.Targets[0]):
+		return http.StatusBadRequest, "目标地址无效"
+	case rule.RouteRepair != nil:
+		return http.StatusConflict, ruleRouteRepairMessage
+	case group.RuleNetwork(rule) == "udp" || rule.TLSShared:
+		return http.StatusBadRequest, "请选择可以连接 TCP 目标的规则"
+	case !node.AcceptRuleProbe && (!admin || len(rule.Path) > 0 || len(rule.BackupPath) > 0 || rule.TLSSharedPort != 0):
+		return http.StatusConflict, "该节点版本尚不支持链路诊断"
+	default:
+		return http.StatusOK, ""
+	}
+}
+
+func (s *Server) probeRuleOptions(w http.ResponseWriter, r *http.Request, u User) {
+	node, ok := s.probeNode(w, r, u)
+	if !ok {
+		return
+	}
+	if !node.Online {
+		fail(w, 409, "节点当前离线")
+		return
+	}
+	group, err := scanGroup(s.db.QueryRowContext(r.Context(), groupSelect+" WHERE id=?", node.GroupID))
+	if err != nil {
+		dbFailure(w, err)
+		return
+	}
+	query := `SELECT r.id,r.port,r.json FROM rules r JOIN users u ON u.id=r.owner
+		WHERE r.entry=? AND json_extract(r.json,'$.enabled')=1 AND ` + ruleServiceActiveSQL + ` AND ` + ruleRouteReadySQL
+	args := []any{node.GroupID}
+	if search := strings.TrimSpace(r.URL.Query().Get("q")); search != "" {
+		query += ` AND (instr(lower(json_extract(r.json,'$.name')),lower(?))>0 OR r.port=?)`
+		args = append(args, search, search)
+	}
+	rows, err := s.db.QueryContext(r.Context(), query+" ORDER BY r.port", args...)
+	if err != nil {
+		dbFailure(w, err)
+		return
+	}
+	defer rows.Close()
+	type option struct {
+		ID   int64  `json:"id"`
+		Name string `json:"name"`
+		Port int    `json:"port"`
+	}
+	const limit = 30
+	options := make([]option, 0, limit)
+	for len(options) < limit && rows.Next() {
+		var item option
+		var raw []byte
+		var rule wire.Rule
+		if err := rows.Scan(&item.ID, &item.Port, &raw); err != nil {
+			dbFailure(w, err)
+			return
+		}
+		if json.Unmarshal(raw, &rule) != nil {
+			continue
+		}
+		if status, _ := connectivityRuleStatus(node, group, rule, u.Admin); status == http.StatusOK {
+			item.Name = rule.Name
+			options = append(options, item)
+		}
+	}
+	if err := rows.Err(); err != nil {
+		dbFailure(w, err)
+		return
+	}
+	respond(w, 200, options)
+}
+
 func (s *Server) probeConnectivity(w http.ResponseWriter, r *http.Request, u User) {
 	node, ok := s.probeNode(w, r, u)
 	if !ok {
@@ -152,25 +224,17 @@ func (s *Server) probeConnectivity(w http.ResponseWriter, r *http.Request, u Use
 		return
 	}
 	var rule wire.Rule
-	if json.Unmarshal([]byte(config), &rule) != nil || len(rule.Targets) == 0 || !targetOK(rule.Targets[0]) {
+	if json.Unmarshal([]byte(config), &rule) != nil {
 		fail(w, 400, "目标地址无效")
 		return
 	}
-	if rule.RouteRepair != nil {
-		fail(w, 409, ruleRouteRepairMessage)
-		return
-	}
-	group, err := scanGroup(s.db.QueryRow(groupSelect+" WHERE id=?", node.GroupID))
+	group, err := scanGroup(s.db.QueryRowContext(r.Context(), groupSelect+" WHERE id=?", node.GroupID))
 	if err != nil {
 		dbFailure(w, err)
 		return
 	}
-	if group.RuleNetwork(rule) == "udp" || rule.TLSShared {
-		fail(w, 400, "请选择可以连接 TCP 目标的规则")
-		return
-	}
-	if !node.AcceptRuleProbe && (!u.Admin || len(rule.Path) > 0 || len(rule.BackupPath) > 0 || rule.TLSSharedPort != 0) {
-		fail(w, 409, "该节点版本尚不支持链路诊断")
+	if status, reason := connectivityRuleStatus(node, group, rule, u.Admin); status != http.StatusOK {
+		fail(w, status, reason)
 		return
 	}
 	task := wire.DiagnosticTask{ID: token(), Address: rule.Targets[0]}
@@ -334,7 +398,7 @@ func (s *Server) diagnoseEntry(ctx context.Context, device wire.Device, detailed
 
 func (s *Server) probePing(w http.ResponseWriter, r *http.Request, u User) {
 	if s.setting("lookingGlass", "false") != "true" {
-		fail(w, 403, "Looking Glass 已关闭")
+		fail(w, 403, "节点 Ping 测试已关闭")
 		return
 	}
 	node, ok := s.probeNode(w, r, u)

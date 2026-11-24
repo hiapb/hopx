@@ -95,7 +95,7 @@ type GroupConfig = {
 
 type Accounting = { userId: number; amount: number; description?: string };
 type AccountingPreview = { name: string; balance: number; after: number; values: Accounting };
-type OfflineNotice = { default: number; groups: Record<string, number>; retention?: number; groupRetention?: Record<string, number> };
+type OfflineNotice = { default: number; groups: Record<string, number> };
 
 const groupKinds = [
   { value: "monitor", label: "仅监控" },
@@ -850,6 +850,7 @@ export default function Management({ page, user, refresh }: Props) {
     const shownColumns = page === "users" && !narrow
       ? columns.filter(column => column.key === "action" || visibleUserColumns.includes(column.dataIndex || column.key))
       : columns;
+    const tableRows = isPaged ? list.slice(0, isOrderPage ? 50 : userPageSize) : visibleGroups;
     function saveUserColumns(keys: string[]) {
       setVisibleUserColumns(keys);
       try { localStorage.setItem(columnPreference, JSON.stringify(keys)); }
@@ -857,6 +858,25 @@ export default function Management({ page, user, refresh }: Props) {
     }
     const orderKinds = ledger ? ["referral", "affiliate_transfer", "affiliate_manual", "legacy_affiliate"] :
       ["purchase", "renew", "redeem", "epay", "epusdt", "tokenpay", "cryptomus", "manual", "transfer"];
+    const groupActions = page === "groups" ? [
+      { key: "move", label: "分组", disabled: !selectedGroups.length, onClick: () => edit("批量分组", "/admin/groups/folders", "PUT", [
+        { name: "name", label: "分组名称", help: "留空可移到未分组" },
+      ], { ids: selectedGroups, name: folderFilter || "" }) },
+      { key: "folders", label: "管理分组", disabled: folderCounts.size === Number(folderCounts.has("")), onClick: () => edit("管理分组", "/admin/groups/folders", "PUT", [
+        { name: "from", label: "现有分组", kind: "select", required: true,
+          options: [...folderCounts.keys()].filter(Boolean).map(name => ({ value: name, label: name })) },
+        { name: "name", label: "新名称", help: "填已有分组名称可合并，留空可移到未分组" },
+      ], { from: folderFilter || undefined, name: "" }) },
+      { key: "traffic", label: "清空流量", disabled: !selectedGroups.some(id => list.some(row => row.id === id && ["entry", "both"].includes(row.kind))),
+        onClick: () => confirmAction({
+          title: "清空所选入口设备组的流量统计？",
+          onOk: async () => {
+            const saved = await action("/admin/groups/clear-traffic", "POST", { ids: selectedGroups });
+            if (saved) setSelectedGroups([]);
+            return saved;
+          },
+        }) },
+    ] : [];
     return (
       <section className="table-section panel-table">
         <header className="page-head">
@@ -893,7 +913,7 @@ export default function Management({ page, user, refresh }: Props) {
         }} items={[{key: "ledger", label: "佣金账单"}, {key: "registrations", label: "邀请注册"}]} />}
         {page === "users" && <div className="operator-toolbar">
           <div className="operator-actions">{toolbar}</div>
-          <Space wrap className="operator-filters user-filters">
+          <Space wrap={!narrow} className="operator-filters user-filters">
             <Input.Search allowClear placeholder="用户名或用户 ID" onSearch={value => { setUserSearch(value); setUserPage(0); }} />
             <Select aria-label="账号角色" value={userRole} onChange={value => { setUserRole(value); setUserPage(0); }} options={[
               { value: "", label: "全部角色" }, { value: "admin", label: "管理员" }, { value: "member", label: "普通用户" },
@@ -913,7 +933,7 @@ export default function Management({ page, user, refresh }: Props) {
             ]} />
           </Space>
         </div>}
-        {isOrderPage && <Space wrap className="list-toolbar">
+        {isOrderPage && <Space wrap={!narrow} className="list-toolbar">
           <Input.Search allowClear placeholder={adminOrders ? "订单号、用户名或 UID" : "订单号"} onSearch={value => { setOrderQuery(value.trim()); setOrderPage(0); }} />
           <Select aria-label="订单类型" value={orderKind} onChange={value => { setOrderKind(value); setOrderPage(0); }} options={[
             { value: "", label: "全部类型" }, ...orderKinds.map(value => ({ value, label: labels[value] || value })),
@@ -929,7 +949,7 @@ export default function Management({ page, user, refresh }: Props) {
                 return saved;
               } })}>删除选中</Button>}
         </Space>}
-        {page === "redeem" && <Space wrap className="list-toolbar">
+        {page === "redeem" && <Space wrap={!narrow} className="list-toolbar">
           <Button disabled={!selectedCodes.length} onClick={() => confirmAction({ title: "删除选中的兑换码？",
             onOk: async () => {
               const saved = await action("/admin/redeem/batch", "POST", { codes: selectedCodes, delete: true });
@@ -947,31 +967,19 @@ export default function Management({ page, user, refresh }: Props) {
             ...[...folderCounts].filter(([name]) => name).map(([name, count]) => ({ key: "folder:" + name, label: `${name} (${count})` })),
           ]} />
           <div className="operator-toolbar">
-            <Space wrap className="operator-actions">
+            <Space wrap={!narrow} className="operator-actions">
               <Button onClick={() => edit("新增分组", "/admin/groups/folders", "PUT", [
                 { name: "name", label: "分组名称", required: true },
               ])}>新增分组</Button>
-              <Button disabled={!selectedGroups.length} onClick={() => edit("批量分组", "/admin/groups/folders", "PUT", [
-                { name: "name", label: "分组名称", help: "留空可移到未分组" },
-              ], { ids: selectedGroups, name: folderFilter || "" })}>分组</Button>
-              <Button disabled={folderCounts.size === Number(folderCounts.has(""))} onClick={() => edit("管理分组", "/admin/groups/folders", "PUT", [
-                { name: "from", label: "现有分组", kind: "select", required: true,
-                  options: [...folderCounts.keys()].filter(Boolean).map(name => ({ value: name, label: name })) },
-                { name: "name", label: "新名称", help: "填已有分组名称可合并，留空可移到未分组" },
-              ], { from: folderFilter || undefined, name: "" })}>管理分组</Button>
-              <Button disabled={!selectedGroups.some(id => list.some(row => row.id === id && ["entry", "both"].includes(row.kind)))}
-                onClick={() => confirmAction({
-                  title: "清空所选入口设备组的流量统计？",
-                  onOk: async () => {
-                    const saved = await action("/admin/groups/clear-traffic", "POST", { ids: selectedGroups });
-                    if (saved) setSelectedGroups([]);
-                    return saved;
-                  },
-                })}>清空流量</Button>
+              {narrow ? <Dropdown trigger={["click"]} menu={{ items: groupActions }}>
+                <Button icon={<Ellipsis size={17} />}>更多操作</Button>
+              </Dropdown> : groupActions.map(({ key, label, disabled, onClick }) => (
+                <Button key={key} disabled={disabled} onClick={onClick}>{label}</Button>
+              ))}
               <RefreshButton reload={[data.reload, groupTotals.reload, deviceFolders.reload]} />
               {selectedGroups.length > 0 && <Tag>已选 {selectedGroups.length} 个设备组</Tag>}
             </Space>
-            <Space wrap className="operator-filters">
+            <Space wrap={!narrow} className="operator-filters">
               <Input aria-label="搜索设备组" placeholder="名称、ID 或地址" allowClear value={groupQuery}
                 onChange={event => { setGroupQuery(event.target.value); setSelectedGroups([]); }} />
               <Select aria-label="设备组类型" value={groupType} onChange={value => { setGroupType(value); setSelectedGroups([]); }}
@@ -1006,12 +1014,13 @@ export default function Management({ page, user, refresh }: Props) {
           rowKey={(r) => r.id ?? r.code}
           loading={data.busy}
           locale={{ emptyText: data.busy ? " " : <div className="muted">{data.error ? "加载失败" : "没有可显示的记录"}</div> }}
-          dataSource={isPaged ? list.slice(0, isOrderPage ? 50 : userPageSize) : visibleGroups}
+          dataSource={tableRows}
+          showHeader={!narrow || tableRows.length > 0}
           columns={reorderPaths[page] ? [{
             title: "排序", key: "order", width: 80,
             render: (_: unknown, row: Row, index: number) => sortHandle({ id: row.id, name: row.name, showOrder: row.showOrder }, index, visibleGroups),
           }, ...shownColumns] : shownColumns}
-          scroll={narrow && (isGroupEditor || isTunnel || page === "users") ? undefined : { x: page === "users" ? Math.max(650, shownColumns.length * 96 + 100) : 620 }}
+          scroll={narrow && !tableRows.length ? undefined : { x: page === "users" ? Math.max(650, shownColumns.length * 96 + 100) : narrow && (isGroupEditor || isTunnel) ? 980 : 620 }}
           pagination={isPaged ? false : { pageSize: 15, hideOnSinglePage: true }}
         />
         {page === "users" && <Pagination className="table-footer page-controls" size="small"
@@ -1140,7 +1149,7 @@ export default function Management({ page, user, refresh }: Props) {
             {
               title:"操作",
               key:"operation",
-              render: (_: unknown, row: Row) => <Space wrap>
+              render: (_: unknown, row: Row) => <Space className={narrow ? "row-actions" : undefined} wrap={!narrow}>
                 {["epay", "epusdt", "tokenpay", "cryptomus"].includes(row.kind) && row.status === "pending" &&
                   (adminOrders ? <Button size="small" onClick={() => confirm("确认已核实入账并补单？", "/admin/orders/" + row.id + "/settle", "POST")}>补单</Button> :
                     <Button size="small" onClick={() => void resumePayment(row.id)}>继续支付</Button>)}
@@ -1203,15 +1212,28 @@ export default function Management({ page, user, refresh }: Props) {
             发布通知
           </Button>,
         );
-      case "users":
+      case "users": {
         const sortable = (key: string) => ({ key, sorter: true, sortOrder: userSort !== key ? null : userDirection === "asc" ? "ascend" : "descend" });
+        const cleanupActions = [
+          { key: "users", label: "清理无效用户", onClick: async () => {
+            try {
+              const result = await api<{ count: number }>("/admin/users/cleanup", "POST", { confirm: false });
+              if (!result.count) { message.info("没有可清理的用户"); return; }
+              confirmAction({ title: "清理 " + result.count + " 个无有效套餐、余额或关联记录的账号？", content: "关联的转发规则将同时删除。", onOk: () => action("/admin/users/cleanup", "POST", { confirm: true }) });
+            } catch (error) { message.error((error as Error).message); }
+          } },
+          { key: "rules", label: "清理无效规则", onClick: async () => {
+            try {
+              const result = await api<{ count: number }>("/admin/rules/cleanup", "POST", { confirm: false });
+              if (!result.count) { message.info("没有失去关联设备组的规则"); return; }
+              confirmAction({ title: "清理 " + result.count + " 条无效规则？", onOk: () => action("/admin/rules/cleanup", "POST", { confirm: true }) });
+            } catch (error) { message.error((error as Error).message); }
+          } },
+        ];
         return table(
           [
             { title: "UID", dataIndex: "id", ...sortable("id") },
-            { title: "用户名", dataIndex: "name", ...sortable("name"), render: (name: string, row: User) => <>
-              <span className="data-title">{name}</span>
-              {narrow && <span className="data-secondary">{row.banned ? "封禁" : row.admin ? "管理员" : currency(row.balance)}</span>}
-            </> },
+            { title: "用户名", dataIndex: "name", ...sortable("name"), render: (name: string) => <span className="data-title">{name}</span> },
             { title: "过期时间", dataIndex: "expires", ...sortable("expires"), render: (_: number, r: User) => planExpiryLabel(r) },
             { title: "流量", ...sortable("traffic"), render: (_: unknown, r: User) => bytes(r.used) + " / " + (r.unlimitedTraffic ? "不限流量" : bytes(r.quota)) },
             { title: "套餐", dataIndex: "planId", render: (id: number) => userPlans.value.find(plan => plan.id === id)?.name || (id ? "#" + id : "—") },
@@ -1224,7 +1246,7 @@ export default function Management({ page, user, refresh }: Props) {
             {
               title: "操作",
               key: "action",
-              width: narrow ? 112 : 198,
+              width: narrow ? 128 : 198,
               render: (_: unknown, r: User) => {
                 const actions = [
                   { label: "重置密码", icon: Unlink, onClick: () => edit("重置 " + r.name + " 的密码", "/admin/users/" + r.id + "/password", "PUT", [{ name: "password", label: "新密码", kind: "secret", required: true }]) },
@@ -1269,30 +1291,27 @@ export default function Management({ page, user, refresh }: Props) {
               },
             },
             { title: "备注", dataIndex: "note", render: (note?: string) => note?.split("\n")[0] || "—" },
-          ].filter(column => !narrow || ["id", "name", "action"].includes(column.dataIndex || column.key || "")),
-          <Space wrap>
+          ],
+          <Space wrap={!narrow}>
             <Button type="primary" icon={<Plus size={15} />} onClick={() => edit("添加用户", "/admin/users", "POST", [
               { name: "name", label: "账号", required: true },
               { name: "password", label: "密码", kind: "secret", required: true },
             ])}>添加用户</Button>
-            <Button href="#/rules?search=1">搜索规则</Button>
-            <Button icon={<Trash2 size={14} />} onClick={async () => {
-              try {
-                const result = await api<{ count: number }>("/admin/users/cleanup", "POST", { confirm: false });
-                if (!result.count) { message.info("没有可清理的用户"); return; }
-                confirmAction({ title: "清理 " + result.count + " 个无有效套餐、余额或关联记录的账号？", content: "关联的转发规则将同时删除。", onOk: () => action("/admin/users/cleanup", "POST", { confirm: true }) });
-              } catch (error) { message.error((error as Error).message); }
-            }}>清理无效用户</Button>
-            <Button icon={<Trash2 size={14} />} onClick={async () => {
-              try {
-                const result = await api<{ count: number }>("/admin/rules/cleanup", "POST", { confirm: false });
-                if (!result.count) { message.info("没有失去关联设备组的规则"); return; }
-                confirmAction({ title: "清理 " + result.count + " 条无效规则？", onOk: () => action("/admin/rules/cleanup", "POST", { confirm: true }) });
-              } catch (error) { message.error((error as Error).message); }
-            }}>清理无效规则</Button>
+            {narrow ? <Dropdown trigger={["click"]} menu={{ items: [
+              { key: "search", label: <a href="#/rules?search=1">搜索规则</a> },
+              ...cleanupActions.map(({ key, label, onClick }) => ({ key, label, onClick, icon: <Trash2 size={14} /> })),
+            ] }}>
+              <Button icon={<Ellipsis size={17} />}>更多操作</Button>
+            </Dropdown> : <>
+              <Button href="#/rules?search=1">搜索规则</Button>
+              {cleanupActions.map(({ key, label, onClick }) => (
+                <Button key={key} icon={<Trash2 size={14} />} onClick={onClick}>{label}</Button>
+              ))}
+            </>}
             <RefreshButton reload={[data.reload, userTotal.reload]} />
           </Space>,
         );
+      }
       case "user-groups":
         return table(
           [
@@ -1475,21 +1494,17 @@ export default function Management({ page, user, refresh }: Props) {
                 <div>
                   <span className="data-title">{r.name}</span>
                   <span className="data-secondary">#{r.id}{r.owner ? " · 用户 UID " + r.owner : ""}</span>
-                  {narrow && r.connectHost && <div className="muted mono">{r.connectHost}</div>}
-                  {narrow && <div className="muted">{groupKindLabel(r.kind)}</div>}
                   {r.folder && <div className="muted">{r.folder}</div>}
                 </div>
               ),
             },
             {
               title: "类型",
-              responsive: ["md"],
               dataIndex: "kind",
               render: (kind: string) => groupKindLabel(kind),
             },
             {
               title: "连接地址 / 端口池",
-              responsive: ["md"],
               key: "ports",
               render: (_: unknown, r: Group) =>
                 r.kind !== "entry" && r.kind !== "both" ? "—" : <div>
@@ -1498,7 +1513,6 @@ export default function Management({ page, user, refresh }: Props) {
             },
             {
               title: "协议",
-              responsive: ["md"],
               render: (_: unknown, r: Group) => {
                 const entry = r.kind === "entry" || r.kind === "both";
                 const relay = ["exit", "relay", "both"].includes(r.kind);
@@ -1512,13 +1526,11 @@ export default function Management({ page, user, refresh }: Props) {
             },
             {
               title: "流量倍率",
-              responsive: ["md"],
               dataIndex: "ratio",
               render: (v: number) => v / 1000 + "×",
             },
             {
               title: "授权用户组",
-              responsive: ["md"],
               render: (_: unknown, r: Group) => {
                 const ids = authorizedUserGroups(r);
                 const known = Array.isArray(groupUsers.value) ? groupUsers.value : [];
@@ -1532,15 +1544,15 @@ export default function Management({ page, user, refresh }: Props) {
               },
             },
             ...(isGroupEditor ? [
-              { title: "已用流量", responsive: ["lg"], render: (_: unknown, row: Group) => groupTotals.value[row.id] ? bytes(groupTotals.value[row.id].traffic) : "—" },
-              { title: "备注", dataIndex: "note", responsive: ["xl"], render: (note?: string) => note?.split("\n")[0] || "—" },
+              { title: "已用流量", responsive: narrow ? undefined : ["lg"], render: (_: unknown, row: Group) => groupTotals.value[row.id] ? bytes(groupTotals.value[row.id].traffic) : "—" },
+              { title: "备注", dataIndex: "note", responsive: narrow ? undefined : ["xl"], render: (note?: string) => note?.split("\n")[0] || "—" },
             ] : []),
             {
               title: "操作",
               key: "action",
-              width: narrow ? 128 : 204,
+              width: narrow ? 172 : 204,
               render: (_: unknown, r: Group) => (
-                <Space className="row-actions" wrap={narrow} size={3}>
+                <Space className="row-actions" size={3}>
                   {r.kind !== "chain" && (
                     <Button size="small" onClick={() => void enlist(r)}>接入</Button>
                   )}
@@ -1739,16 +1751,14 @@ export default function Management({ page, user, refresh }: Props) {
       {page === "notifications" && <section className="panel-table">
         <header className="page-head"><h1>设备离线通知</h1></header>
         {(offlineNotice.error || noticeGroups.error) && <Alert type="error" showIcon message={offlineNotice.error || noticeGroups.error} className="alert-gap" />}
-        <p className="muted alert-gap">宽限期内恢复时静默处理。保留期从最后一次心跳起算，届满后设备从节点状态移除，仍可在设备组中管理。</p>
-        <Space wrap className="list-toolbar">
+        <p className="muted alert-gap">设备在宽限期内恢复时保持静默。离线设备会保留在节点状态列表中，可手动移除。</p>
+        <Space wrap={!narrow} className="list-toolbar">
           <label htmlFor="offline-notice-default">默认宽限期（秒）</label>
           <InputNumber id="offline-notice-default" min={0} max={2592000} precision={0} value={noticeConfig.default}
             disabled={working || offlineNotice.busy} onChange={value => setNoticeDraft({ ...noticeConfig, default: value ?? 0 })} />
-          <label htmlFor="offline-retention-default">默认保留期（秒）</label>
-          <InputNumber id="offline-retention-default" min={1} max={7776000} precision={0} value={noticeConfig.retention || null}
-            placeholder="86400" disabled={working || offlineNotice.busy} onChange={value => setNoticeDraft({ ...noticeConfig, retention: value ?? 0 })} />
         </Space>
         <Table<Group> rowKey="id" size="small" loading={noticeGroups.busy} dataSource={noticeGroups.value.filter(group => group.kind !== "chain")}
+          scroll={narrow ? { x: 390 } : undefined}
           pagination={{ pageSize: 10, hideOnSinglePage: true }} columns={[
             { title: "设备组", dataIndex: "name" },
             { title: "自定义宽限期（秒）", render: (_, group) => <InputNumber
@@ -1759,15 +1769,6 @@ export default function Management({ page, user, refresh }: Props) {
                 if (value === null) delete groups[group.id];
                 else groups[group.id] = value;
                 setNoticeDraft({ ...noticeConfig, groups });
-              }} /> },
-            { title: "自定义保留期（秒）", render: (_, group) => <InputNumber
-              aria-label={group.name + " 离线保留期"} min={1} max={7776000} precision={0}
-              placeholder="使用默认值" value={noticeConfig.groupRetention?.[group.id] ?? null} disabled={working || offlineNotice.busy}
-              onChange={value => {
-                const groupRetention = { ...noticeConfig.groupRetention };
-                if (value === null) delete groupRetention[group.id];
-                else groupRetention[group.id] = value;
-                setNoticeDraft({ ...noticeConfig, groupRetention });
               }} /> },
           ]} />
         <Space wrap className="table-footer">
@@ -2003,6 +2004,7 @@ export default function Management({ page, user, refresh }: Props) {
         <Table<Node>
           rowKey="id"
           size="small"
+          scroll={narrow && nodes.length ? { x: 600 } : undefined}
           pagination={false}
           dataSource={nodes}
           columns={[
@@ -2021,7 +2023,7 @@ export default function Management({ page, user, refresh }: Props) {
               title: "操作",
               key: "action",
               render: (_, n) => (
-                <Space wrap>
+                <Space className={narrow ? "row-actions" : undefined} wrap={!narrow}>
                 <Button size="small" onClick={() => {
                   setGroupDetail(undefined);
                   edit("编辑设备", "/nodes/" + n.id, "PATCH", [
@@ -2030,12 +2032,13 @@ export default function Management({ page, user, refresh }: Props) {
                     { name: "address", label: "展示地址" },
                   ], { name: n.name, region: n.region, address: n.address });
                 }}>编辑</Button>
-                <Button
+                {user.admin && <Button
                   danger
                   size="small"
                   onClick={() =>
                     confirmAction({
                       title: "移除 " + n.name + "？",
+                      content: "将删除该节点的接入记录。重新使用时需再次接入。",
                       onOk: async () => {
                         const saved = await action("/nodes/" + n.id, "DELETE");
                         if (saved) setNodes((v) => v.filter((x) => x.id !== n.id));
@@ -2045,7 +2048,7 @@ export default function Management({ page, user, refresh }: Props) {
                   }
                 >
                   移除
-                </Button>
+                </Button>}
                 </Space>
               ),
             },

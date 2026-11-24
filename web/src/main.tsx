@@ -42,6 +42,7 @@ import {
 import { api, useData } from "./api";
 import type { Site, User } from "./api";
 import Turnstile from "./turnstile";
+import { useTooltipKeyboardNavigation } from "./dismissible-tooltip";
 import "./styles.css";
 
 class PageModuleError extends Error {
@@ -164,15 +165,14 @@ function Brand() {
   );
 }
 
-function HomePage({ site, admin }: { site: Site; admin: boolean }) {
+function HomePage({ site }: { site: Site }) {
+  const name = site.name.trim() || "HopX";
   const links = site.homeLinks ?? [];
   return (
     <div className="home-page">
+      <h1 className="home-welcome">欢迎使用 {name}</h1>
       <section className="home-notice" aria-labelledby="home-notice-title">
-        <header className="home-notice-heading">
-          <h1 id="home-notice-title"><Megaphone size={21} aria-hidden="true" />站点公告</h1>
-          {admin && <Button size="small" href="#/settings?section=announcement">编辑主页</Button>}
-        </header>
+        <h2 className="home-notice-heading" id="home-notice-title"><Megaphone size={18} aria-hidden="true" />站点公告</h2>
         <p className={site.announcement.trim() ? "home-notice-text" : "home-notice-text muted"}>
           {site.announcement.trim() || "暂无站点公告"}
         </p>
@@ -205,6 +205,7 @@ function Login({ site, done, invite }: { site: Site; done: () => Promise<void>; 
   const canRegister = site.registration !== "closed";
   const [showRegister, setShowRegister] = useState(Boolean(invite));
   const register = canRegister && showRegister;
+  const passwordBytes = site.registrationPasswordBytes ?? { min: 10, max: 72 };
   const verification = site.registrationVerification ?? (site.registrationChallenge === "true" ? "arithmetic" : "off");
   const arithmetic = register && verification === "arithmetic";
   const turnstile = register && verification === "turnstile";
@@ -294,7 +295,16 @@ function Login({ site, done, invite }: { site: Site; done: () => Promise<void>; 
             <Form.Item name="name" label="账号" rules={[{ required: true, message: "请输入账号" }]}>
               <Input autoComplete="username" size="large" placeholder="输入账号" />
             </Form.Item>
-            <Form.Item name="password" label="密码" rules={[{ required: true, message: "请输入密码" }]}>
+            <Form.Item name="password" label="密码" validateFirst
+              extra={register ? `密码长度为 ${passwordBytes.min}–${passwordBytes.max} 字节。英文字母、数字和常用英文符号各占 1 字节，汉字通常占 3 字节。` : undefined}
+              rules={[
+                { required: true, message: "请输入密码" },
+                ...(register ? [{ validator: async (_: unknown, password: string) => {
+                  const size = new TextEncoder().encode(password).length;
+                  if (size < passwordBytes.min) throw new Error(`密码太短，至少需要 ${passwordBytes.min} 字节（当前 ${size} 字节）`);
+                  if (size > passwordBytes.max) throw new Error(`密码太长，最多允许 ${passwordBytes.max} 字节（当前 ${size} 字节）`);
+                } }] : []),
+              ]}>
               <Input.Password autoComplete={register ? "new-password" : "current-password"} size="large" placeholder="输入密码" />
             </Form.Item>
             {register && site.registration !== "no-invite" && (
@@ -474,7 +484,7 @@ function Shell({
           {!accessible ? (
             <Alert type="info" showIcon message="此页面当前不可用" />
           ) : page === "" ? (
-            <HomePage admin={user.admin} site={site.value} />
+            <HomePage site={site.value} />
           ) : page === "dashboard" ? (
             <AdminDashboard />
           ) : page === "profile" ? (
@@ -485,7 +495,8 @@ function Shell({
             <Rules key={path} user={user} initialQuery={ruleQuery.toString()} refreshUser={session.reload}
               siteProbeInterval={site.value.ruleProbeInterval === "60" ? 60 : 300} showShop={user.admin || !disabledMenus.has("shop")} />
           ) : page === "nodes" ? (
-            <Nodes user={user} lookingGlass={site.value.lookingGlass === "true"} />
+            <Nodes user={user} lookingGlass={site.value.lookingGlass === "true"}
+              showExitIP={user.admin && site.value.showAdminNodeIPs === true} />
           ) : (
             <Management
               key={path}
@@ -502,6 +513,7 @@ function Shell({
 }
 
 function Root() {
+  useTooltipKeyboardNavigation();
   const [dark, setDark] = useState(
     localStorage.getItem("hopx-theme") === "dark",
   );

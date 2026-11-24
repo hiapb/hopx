@@ -29,10 +29,12 @@ func fileDescriptorBudget(listeners, connections int, relayEnabled bool) (int, i
 func memorySessionLimit(configured int) int {
 	var ram uint64
 	var proc procReader
-	proc.lines("/proc/meminfo", func(fields []string) {
+	proc.lines("/proc/meminfo", func(fields []string) bool {
 		if len(fields) > 1 && fields[0] == "MemTotal:" {
 			ram = number(fields[1]) * 1024
+			return true
 		}
+		return false
 	})
 	for _, path := range []string{"/sys/fs/cgroup/memory.max", "/sys/fs/cgroup/memory/memory.limit_in_bytes"} {
 		raw, err := os.ReadFile(path)

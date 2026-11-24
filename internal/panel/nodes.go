@@ -81,6 +81,27 @@ func bearer(r *http.Request) string {
 	return credential
 }
 
+func fillNodeAddresses(addresses wire.NodeAddresses, r *http.Request) wire.NodeAddresses {
+	// The immediate peer of a proxied request is not the node.
+	for _, header := range [...]string{"Forwarded", "X-Forwarded-For", "X-Real-IP", "CF-Connecting-IP"} {
+		if r.Header.Get(header) != "" {
+			return addresses
+		}
+	}
+	host, _, _ := net.SplitHostPort(r.RemoteAddr)
+	ip, _ := netip.ParseAddr(host)
+	ip = ip.Unmap()
+	if wire.PublicDestination(ip) {
+		if ip.Is4() && addresses.IPv4 == "" {
+			addresses.IPv4 = ip.String()
+		}
+		if ip.Is6() && addresses.IPv6 == "" {
+			addresses.IPv6 = ip.String()
+		}
+	}
+	return addresses
+}
+
 func (s *Server) registerNode(w http.ResponseWriter, r *http.Request) {
 	var input wire.Registration
 	credential := bearer(r)
@@ -95,16 +116,8 @@ func (s *Server) registerNode(w http.ResponseWriter, r *http.Request) {
 		fail(w, 400, "节点信息无效")
 		return
 	}
-	if host, _, err := net.SplitHostPort(r.RemoteAddr); err == nil {
-		if ip := net.ParseIP(host); ip != nil && ip.IsGlobalUnicast() && !ip.IsPrivate() {
-			if ip.To4() != nil && input.IPv4 == "" {
-				input.IPv4 = host
-			}
-			if ip.To4() == nil && input.IPv6 == "" {
-				input.IPv6 = host
-			}
-		}
-	}
+	addresses := fillNodeAddresses(wire.NodeAddresses{IPv4: input.IPv4, IPv6: input.IPv6}, r)
+	input.IPv4, input.IPv6 = addresses.IPv4, addresses.IPv6
 	if input.IPv4 != "" && net.ParseIP(input.IPv4).To4() == nil {
 		fail(w, 400, "IPv4 无效")
 		return
@@ -224,7 +237,7 @@ func (s *Server) deviceGroupSnapshot(forRouting bool, group int64) ([]wire.Devic
 		lastBucket = "coalesce((SELECT bucket FROM probe_samples WHERE node=d.id ORDER BY bucket DESC LIMIT 1),0)"
 	}
 	query := "SELECT d.id,d.group_id,d.registration,g.offline_seconds,d.last_seen,d.token LIKE 'revoked:%'," + lastBucket +
-		",d.in_bytes,d.out_bytes FROM devices d JOIN groups g ON g.id=d.group_id"
+		",d.in_bytes,d.out_bytes,d.status_hidden_at FROM devices d JOIN groups g ON g.id=d.group_id"
 	var args []any
 	if group != 0 {
 		query += " WHERE d.group_id=?"
@@ -239,12 +252,12 @@ func (s *Server) deviceGroupSnapshot(forRouting bool, group int64) ([]wire.Devic
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 	for rows.Next() {
-		var id, group, last, lastSeen int64
+		var id, group, last, lastSeen, hiddenAt int64
 		var raw string
 		var timeout int
 		var revoked bool
 		var inbound, outbound sql.NullInt64
-		if e = rows.Scan(&id, &group, &raw, &timeout, &lastSeen, &revoked, &last, &inbound, &outbound); e != nil {
+		if e = rows.Scan(&id, &group, &raw, &timeout, &lastSeen, &revoked, &last, &inbound, &outbound, &hiddenAt); e != nil {
 			return nil, e
 		}
 		d := s.devices[id]
@@ -266,6 +279,7 @@ func (s *Server) deviceGroupSnapshot(forRouting bool, group int64) ([]wire.Devic
 		}
 		d.Revoked = revoked
 		d.Online = d.Online && !revoked
+		d.StatusHidden = hiddenAt > 0 && (d.LastSeen.IsZero() || !d.LastSeen.After(time.Unix(0, hiddenAt)))
 		if !d.Online {
 			d.Metrics.InMbps = 0
 			d.Metrics.OutMbps = 0
@@ -295,8 +309,8 @@ func (s *Server) visibleNodes(u User) ([]wire.Device, error) {
 
 func (s *Server) invalidateNodeStatus(pattern string) {
 	switch pattern {
-	case "PUT /api/admin/settings", "PUT /api/admin/notifications/offline", "POST /api/node/register",
-		"PATCH /api/nodes/{id}", "DELETE /api/nodes/{id}", "DELETE /api/admin/nodes/{id}",
+	case "PUT /api/admin/settings", "POST /api/node/register",
+		"PATCH /api/nodes/{id}", "DELETE /api/nodes/{id}", "DELETE /api/admin/nodes/{id}", "POST /api/admin/nodes/{id}/hide-status",
 		"POST /api/admin/groups", "PUT /api/admin/groups/{id}", "DELETE /api/admin/groups/{id}",
 		"POST /api/tunnels", "PUT /api/tunnels/{id}", "DELETE /api/tunnels/{id}", "POST /api/groups/{id}/operations":
 		s.nodeStatusMu.Lock()
@@ -306,11 +320,10 @@ func (s *Server) invalidateNodeStatus(pattern string) {
 }
 
 type nodeStatusSnapshot struct {
-	until     time.Time
-	groups    []wire.DeviceGroup
-	devices   []wire.Device
-	settings  map[string]string
-	retention offlineNotificationSettings
+	until    time.Time
+	groups   []wire.DeviceGroup
+	devices  []wire.Device
+	settings map[string]string
 }
 
 func (s *Server) statusSnapshot(equipmentGroup int64) (nodeStatusSnapshot, error) {
@@ -321,8 +334,8 @@ func (s *Server) statusSnapshot(equipmentGroup int64) (nodeStatusSnapshot, error
 			return s.nodeStatus, nil
 		}
 	}
-	settings := make(map[string]string, 3)
-	rows, err := s.db.Query("SELECT key,value FROM settings WHERE key IN ('showNodeStatus','hideIPs','hideAdminIPs')")
+	settings := make(map[string]string, 2)
+	rows, err := s.db.Query("SELECT key,value FROM settings WHERE key IN ('showNodeStatus','hideAdminIPs')")
 	if err != nil {
 		return nodeStatusSnapshot{}, err
 	}
@@ -342,7 +355,6 @@ func (s *Server) statusSnapshot(equipmentGroup int64) (nodeStatusSnapshot, error
 	out := nodeStatusSnapshot{settings: settings}
 	if equipmentGroup == 0 {
 		out.groups, err = s.groups()
-		out.retention = s.offlineNotificationConfig()
 	} else {
 		var group wire.DeviceGroup
 		group, err = scanGroup(s.db.QueryRow(groupSelect+" WHERE id=?", equipmentGroup))
@@ -371,9 +383,8 @@ func (s *Server) visibleDevices(u User, equipmentGroup int64) ([]wire.Device, er
 		return nil, err
 	}
 	showStatus := u.Admin || snapshot.settings["showNodeStatus"] != "false"
+	showAdminIPs := u.Admin && snapshot.settings["hideAdminIPs"] != "true"
 	visible := make(map[int64]wire.DeviceGroup, len(snapshot.groups))
-	expiry := make(map[int64]int64, len(snapshot.groups))
-	now := time.Now().Unix()
 	for _, g := range snapshot.groups {
 		owns := g.Owner == u.ID
 		if equipmentGroup != 0 {
@@ -383,7 +394,6 @@ func (s *Server) visibleDevices(u User, equipmentGroup int64) ([]wire.Device, er
 		} else if canUse(u, g) && g.Routing.StatusVisibility != "none" &&
 			(u.Admin || owns || (!g.HideStatus && g.Routing.StatusVisibility != "admin" && showStatus)) {
 			visible[g.ID] = g
-			expiry[g.ID] = now - snapshot.retention.retentionThreshold(strconv.FormatInt(g.ID, 10), g.OfflineSeconds)
 		}
 	}
 	list := []wire.Device{}
@@ -392,16 +402,15 @@ func (s *Server) visibleDevices(u User, equipmentGroup int64) ([]wire.Device, er
 	currentTime := time.Now()
 	for _, d := range snapshot.devices {
 		g, ok := visible[d.GroupID]
-		if !ok || (equipmentGroup == 0 && (d.Revoked || (!d.Online && !d.LastSeen.IsZero() && d.LastSeen.Unix() <= expiry[d.GroupID]))) {
+		if !ok || (equipmentGroup == 0 && (d.Revoked || d.StatusHidden)) {
 			continue
 		}
 		registration := d.Registration
 		d.Registration = wire.Registration{Name: registration.Name, Region: registration.Region, RelayTransport: registration.RelayTransport}
-		if (u.Admin && snapshot.settings["hideAdminIPs"] != "true") ||
-			(!u.Admin && (g.Owner == u.ID || snapshot.settings["hideIPs"] == "false")) {
+		if showAdminIPs || (equipmentGroup != 0 && !u.Admin && g.Owner == u.ID) {
 			d.Address, d.IPv4, d.IPv6 = registration.Address, registration.IPv4, registration.IPv6
 		}
-		if !u.Admin || snapshot.settings["hideAdminIPs"] == "true" {
+		if !showAdminIPs {
 			d.UpdateError, d.ApplyError, d.Revision, d.NativeUDPError, d.RelayModeError = "", "", "", "", ""
 		}
 		if live := s.nodeBandwidth[d.ID]; d.Online && live != nil && currentTime.Sub(live.at) < bandwidthFreshness &&
@@ -418,17 +427,16 @@ func (s *Server) pruneDeviceSessions() {
 	if err != nil {
 		return
 	}
-	config := s.offlineNotificationConfig()
-	now := time.Now().Unix()
-	expiry := make(map[int64]int64, len(groups))
+	now := time.Now()
+	expiry := make(map[int64]time.Time, len(groups))
 	for _, group := range groups {
-		expiry[group.ID] = now - config.retentionThreshold(strconv.FormatInt(group.ID, 10), group.OfflineSeconds)
+		expiry[group.ID] = now.Add(-time.Duration(group.OfflineSeconds)*time.Second - time.Hour)
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	for id, device := range s.devices {
 		cutoff, registered := expiry[device.GroupID]
-		if !registered || (!device.LastSeen.IsZero() && device.LastSeen.Unix() <= cutoff) {
+		if !registered || (!device.LastSeen.IsZero() && !device.LastSeen.After(cutoff)) {
 			delete(s.devices, id)
 			s.clearNodeBandwidth(id)
 			delete(s.probeStored, id)
@@ -446,12 +454,18 @@ func (s *Server) listNodes(w http.ResponseWriter, r *http.Request, u User) {
 	respond(w, 200, list)
 }
 
-func (s *Server) events(w http.ResponseWriter, r *http.Request, _ User) {
+func (s *Server) events(w http.ResponseWriter, r *http.Request, viewer User) {
 	flusher, ok := w.(http.Flusher)
 	if !ok {
 		fail(w, 501, "实时订阅不可用")
 		return
 	}
+	session, err := r.Cookie("hopx_session")
+	if err != nil {
+		fail(w, http.StatusUnauthorized, "请先登录")
+		return
+	}
+	sessionKey := digest(session.Value)
 	w.Header().Set("Content-Type", "text/event-stream")
 	w.Header().Set("X-Accel-Buffering", "no")
 	tick := time.NewTicker(time.Second)
@@ -459,8 +473,10 @@ func (s *Server) events(w http.ResponseWriter, r *http.Request, _ User) {
 	previous := make(map[int64]wire.Device)
 	defer func() {
 		removed := make([]int64, 0, len(previous))
-		for id := range previous {
-			removed = append(removed, id)
+		for id, device := range previous {
+			if device.Online {
+				removed = append(removed, id)
+			}
 		}
 		s.changeBandwidthViewers(nil, removed)
 	}()
@@ -477,34 +493,42 @@ func (s *Server) events(w http.ResponseWriter, r *http.Request, _ User) {
 	for {
 		now := time.Now()
 		if !now.Before(nextSnapshot) {
-			current, err := s.sessionUser(r)
-			if err != nil || current.Banned {
-				return
+			if !nextSnapshot.IsZero() {
+				err := s.db.QueryRowContext(r.Context(), `SELECT u.admin,u.group_id,u.banned FROM sessions s
+					JOIN users u ON u.id=s.user_id WHERE s.token=? AND s.user_id=? AND s.expires>unixepoch()`,
+					sessionKey, viewer.ID).Scan(&viewer.Admin, &viewer.Group, &viewer.Banned)
+				if err != nil || viewer.Banned {
+					return
+				}
 			}
-			list, err := s.visibleNodes(current)
+			list, err := s.visibleNodes(viewer)
 			if err != nil {
 				return
 			}
 			next := make(map[int64]wire.Device, len(list))
 			updates := []wire.Device{}
-			var added []int64
+			var watching, unwatching []int64
 			for _, d := range list {
 				next[d.ID] = d
-				old, known := previous[d.ID]
-				if !known {
-					added = append(added, d.ID)
+				old := previous[d.ID]
+				if d.Online && !old.Online {
+					watching = append(watching, d.ID)
 				}
 				if d != old {
 					updates = append(updates, d)
 				}
 			}
 			removed := []int64{}
-			for id := range previous {
-				if _, kept := next[id]; !kept {
+			for id, old := range previous {
+				current, kept := next[id]
+				if !kept {
 					removed = append(removed, id)
 				}
+				if old.Online && !current.Online {
+					unwatching = append(unwatching, id)
+				}
 			}
-			s.changeBandwidthViewers(added, removed)
+			s.changeBandwidthViewers(watching, unwatching)
 			previous = next
 			if !send("", map[string]any{"items": updates, "removed": removed}) {
 				return
@@ -523,9 +547,48 @@ func (s *Server) events(w http.ResponseWriter, r *http.Request, _ User) {
 	}
 }
 
+func (s *Server) hideOfflineNode(w http.ResponseWriter, r *http.Request, u User) {
+	node, ok := s.probeNode(w, r, u)
+	if !ok {
+		return
+	}
+	tx, err := s.db.BeginTx(r.Context(), nil)
+	if err != nil {
+		dbFailure(w, err)
+		return
+	}
+	defer tx.Rollback()
+	// Check again against the live heartbeat before writing. Take the database
+	// connection first, in the same order as deviceGroupSnapshot.
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	if node.Online || s.devices[node.ID].LastSeen.After(node.LastSeen) {
+		fail(w, 409, "节点已恢复在线，请刷新后重试")
+		return
+	}
+	result, err := tx.ExecContext(r.Context(), "UPDATE devices SET status_hidden_at=? WHERE id=? AND token NOT LIKE 'revoked:%'", time.Now().UnixNano(), node.ID)
+	if err != nil {
+		dbFailure(w, err)
+		return
+	}
+	if count, _ := result.RowsAffected(); count == 0 {
+		fail(w, 404, "设备不存在")
+		return
+	}
+	if err := tx.Commit(); err != nil {
+		dbFailure(w, err)
+		return
+	}
+	w.WriteHeader(204)
+}
+
 func (s *Server) deleteNode(w http.ResponseWriter, r *http.Request, u User) {
+	if r.URL.Query().Get("offline") == "1" {
+		s.hideOfflineNode(w, r, u)
+		return
+	}
 	id := pathID(r)
-	result, e := s.db.Exec("DELETE FROM devices WHERE id=? AND (? OR group_id IN (SELECT id FROM groups WHERE owner=?))", id, u.Admin, u.ID)
+	result, e := s.db.ExecContext(r.Context(), "DELETE FROM devices WHERE id=?", id)
 	if e != nil {
 		dbFailure(w, e)
 		return
@@ -1144,13 +1207,14 @@ func (s *Server) syncNode(w http.ResponseWriter, r *http.Request) {
 		fail(w, 401, "节点凭据无效")
 		return
 	}
-	var group int64
+	var group, hiddenAt int64
+	var offlineSeconds int
 	var raw, mode string
 	var nativeUDP, applyMode bool
 	credentialHash := digest(credential)
 	if s.db.QueryRow(`SELECT d.group_id,d.registration,g.relay_mode,coalesce(json_extract(g.routing,'$.nativeUDP'),0),
-		coalesce(json_extract(g.routing,'$.applyRelayMode'),0) FROM devices d JOIN groups g ON g.id=d.group_id
-		WHERE d.id=? AND d.token=?`, id, credentialHash).Scan(&group, &raw, &mode, &nativeUDP, &applyMode) != nil {
+		coalesce(json_extract(g.routing,'$.applyRelayMode'),0),d.status_hidden_at,g.offline_seconds FROM devices d JOIN groups g ON g.id=d.group_id
+		WHERE d.id=? AND d.token=?`, id, credentialHash).Scan(&group, &raw, &mode, &nativeUDP, &applyMode, &hiddenAt, &offlineSeconds) != nil {
 		fail(w, 401, "节点凭据无效")
 		return
 	}
@@ -1174,6 +1238,25 @@ func (s *Server) syncNode(w http.ResponseWriter, r *http.Request) {
 		dbFailure(w, e)
 		return
 	}
+	if input.Addresses != nil {
+		addresses := fillNodeAddresses(*input.Addresses, r)
+		ipv4, ipv6 := d.IPv4, d.IPv6
+		if ip, err := netip.ParseAddr(addresses.IPv4); err == nil && ip.Unmap().Is4() && wire.PublicDestination(ip) {
+			ipv4 = ip.Unmap().String()
+		}
+		if ip, err := netip.ParseAddr(addresses.IPv6); err == nil && ip.Is6() && !ip.Is4In6() && wire.PublicDestination(ip) {
+			ipv6 = ip.String()
+		}
+		if ipv4 != d.IPv4 || ipv6 != d.IPv6 {
+			if _, err := s.db.ExecContext(r.Context(), `UPDATE devices
+				SET registration=json_set(registration,'$.ipv4',?,'$.ipv6',?)
+				WHERE id=? AND token=? AND coalesce(json_extract(registration,'$.ipv4'),'')=? AND coalesce(json_extract(registration,'$.ipv6'),'')=?`,
+				ipv4, ipv6, id, credentialHash, d.IPv4, d.IPv6); err != nil {
+				dbFailure(w, err)
+				return
+			}
+		}
+	}
 	nativeUDP = nativeUDP && d.RelayAddress != ""
 	if d.RelayAddress != "" && wire.ValidRelayMode(input.ActiveRelayMode) {
 		d.ActiveRelayMode = input.ActiveRelayMode
@@ -1193,7 +1276,8 @@ func (s *Server) syncNode(w http.ResponseWriter, r *http.Request) {
 		d.TargetVersion = candidate.Version
 	}
 	s.mu.Lock()
-	scopingChanged := s.devices[id].AcceptScopedReverse != d.AcceptScopedReverse
+	previous := s.devices[id]
+	scopingChanged := previous.AcceptScopedReverse != d.AcceptScopedReverse
 	s.devices[id] = d
 	bandwidth := s.nodeBandwidth[id]
 	if bandwidth != nil {
@@ -1205,6 +1289,15 @@ func (s *Server) syncNode(w http.ResponseWriter, r *http.Request) {
 		s.probeStored[id] = bucket
 	}
 	s.mu.Unlock()
+	// A reconnect can overlap the administrator hiding an offline row, even
+	// when the authentication query read the previous visibility.
+	if hiddenAt > 0 || d.LastSeen.Sub(previous.LastSeen) >= time.Duration(offlineSeconds)*time.Second {
+		if _, err := s.db.ExecContext(r.Context(), `UPDATE devices SET status_hidden_at=0,last_seen=max(last_seen,?)
+			WHERE id=? AND token=? AND status_hidden_at BETWEEN 1 AND ?`, d.LastSeen.Unix(), id, credentialHash, d.LastSeen.UnixNano()); err != nil {
+			dbFailure(w, err)
+			return
+		}
+	}
 	if d.ReverseAddress != "" && scopingChanged {
 		s.reverseMu.Lock()
 		s.reverseRoutes = nil

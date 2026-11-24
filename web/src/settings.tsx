@@ -1,5 +1,5 @@
 import { useEffect, useState } from "react";
-import { Alert, App, Button, Form, Grid, Input, InputNumber, Radio, Select, Space, Spin, Tabs } from "antd";
+import { Alert, App, Button, Collapse, Form, Grid, Input, InputNumber, Radio, Select, Space, Spin, Tabs } from "antd";
 import { Activity, Plus, Trash2 } from "lucide-react";
 import { api, useData } from "./api";
 import type { HomeLink } from "./api";
@@ -8,8 +8,9 @@ import PaymentChannels from "./payment-channels";
 type Field = {
   name: string;
   label: string;
-  kind?: "area" | "secret" | "select" | "percent";
+  kind?: "area" | "secret" | "select" | "percent" | "money";
   required?: boolean;
+  description?: string;
   options?: {value: string; label: string}[];
 };
 
@@ -45,7 +46,7 @@ const fields: Field[] = [
   {name:"cryptomusCurrency",label:"Cryptomus 币种（默认 CNY）"},
   {name:"cryptomusNetwork",label:"Cryptomus 链（可选）"},
 
-  { name: "minRecharge", label: "最低充值金额（分）" },
+  { name: "minRecharge", label: "最低充值金额（元）", kind: "money" },
   {
     name: "epayKey",
     label: "易支付商户密钥",
@@ -96,17 +97,9 @@ const fields: Field[] = [
     ],
   },
   {
-    name: "hideIPs",
-    label: "普通用户的站点节点地址显示",
-    kind: "select",
-    options: [
-      { value: "false", label: "显示" },
-      { value: "true", label: "隐藏" },
-    ],
-  },
-  {
     name: "hideAdminIPs",
-    label: "管理员的节点地址显示",
+    label: "管理员查看节点出口 IP",
+    description: "普通用户的节点状态页始终隐藏出口 IP。",
     kind: "select",
     options: [
       { value: "false", label: "显示" },
@@ -116,10 +109,10 @@ const fields: Field[] = [
 ];
 
 fields.push(
-  { name: "lookingGlass", label: "Looking Glass 节点 Ping", kind: "select", options: [
+  { name: "lookingGlass", label: "节点 Ping 测试", description: "开启后，可在「节点状态」点击在线节点旁的 Ping，测试到指定域名或 IP 的延迟。", kind: "select", options: [
     { value: "false", label: "关闭" }, { value: "true", label: "开启" },
   ] },
-  { name: "diagnoseIPVisibility", label: "Ping 结果的 IP 显示", kind: "select", options: [
+  { name: "diagnoseIPVisibility", label: "Ping 结果地址可见性", kind: "select", options: [
     { value: "admin", label: "仅管理员可见" }, { value: "all", label: "所有用户可见" }, { value: "none", label: "隐藏" },
   ] },
 );
@@ -136,7 +129,9 @@ fields.push(...[
   options: [{ value: "true", label: "显示" }, { value: "false", label: "隐藏" }],
 })));
 
-for (const [kind, name] of [["epay", "易支付"], ["epusdt", "EPUSDT"], ["tokenpay", "TokenPay"], ["cryptomus", "Cryptomus"]]) {
+const gateways = [["epay", "易支付"], ["epusdt", "EPUSDT"], ["tokenpay", "TokenPay"], ["cryptomus", "Cryptomus"]] as const;
+
+for (const [kind, name] of gateways) {
   fields.push(
     { name: kind + "Enabled", label: name + "通道", kind: "select", options: [
       { value: "auto", label: "配置完成后启用" },
@@ -152,10 +147,7 @@ const sections = [
   { key: "site", label: "基本与权限", match: /^(name|registration|personalTunnels|hide|show|lookingGlass|diagnoseIP)/ },
   { key: "diagnostics", label: "链路诊断", match: /^ruleProbeInterval$/ },
   { key: "announcement", label: "公告与推广", match: /^announcement$/ },
-  { key: "payment", label: "支付", match: /^(minRecharge|epay)/ },
-  { key: "epusdt", label: "EPUSDT", match: /^epusdt/ },
-  { key: "tokenpay", label: "TokenPay", match: /^tokenpay/ },
-  { key: "cryptomus", label: "Cryptomus", match: /^cryptomus/ },
+  { key: "payment", label: "支付", match: /^minRecharge$/ },
   { key: "referral", label: "邀请", match: /^(referral|invitesEnabled)/ },
   { key: "telegram", label: "Telegram", match: /^telegram/ },
 ];
@@ -164,6 +156,7 @@ type SettingsValues = Record<string, string | HomeLink[] | undefined> & { name?:
 
 function restoreSettings(values: Record<string, string>): SettingsValues {
   return {
+    minRecharge: "100",
     ruleProbeInterval: "300",
     registrationVerification: values.registrationChallenge === "true" ? "arithmetic" : "off",
     ...values,
@@ -177,9 +170,13 @@ export default function Settings({ refresh, initialSection }: { refresh: () => P
   const [form] = Form.useForm<SettingsValues>();
   const captchaType = Form.useWatch("registrationVerification", { form, preserve: true });
   const hasTurnstileSecret = data.value?.registrationTurnstileSecretConfigured === "true";
+  const legacySection = gateways.find(([kind]) => kind === initialSection)?.[0];
+  const configuredGateways = gateways.filter(([kind]) => legacySection === kind ||
+    ["Gateway", "PID", "Key"].some(suffix => data.value?.[kind + suffix]?.trim()));
   const [saving, setSaving] = useState(false);
   const [dirty, setDirty] = useState(false);
-  const [section, setSection] = useState(sections.find(item => item.key === initialSection)?.key ?? "site");
+  const [section, setSection] = useState(initialSection === "payment-channels" || legacySection ? "payment" :
+    sections.find(item => item.key === initialSection)?.key ?? "site");
   const { message } = App.useApp();
 
   useEffect(() => {
@@ -194,6 +191,13 @@ export default function Settings({ refresh, initialSection }: { refresh: () => P
     if (!values.name?.trim()) {
       setSection("site");
       message.error("请填写站点名称");
+      return;
+    }
+    const minimum = Number(values.minRecharge);
+    if (values.minRecharge !== data.value?.minRecharge &&
+        (!Number.isInteger(minimum) || minimum < 1 || minimum > 100000000)) {
+      setSection("payment");
+      message.error("最低充值金额须在 0.01 至 1,000,000 元之间");
       return;
     }
     if (values.registrationVerification === "turnstile" &&
@@ -217,6 +221,31 @@ export default function Settings({ refresh, initialSection }: { refresh: () => P
     }
   }
 
+  function renderField(field: Field) {
+    const money = field.kind === "money";
+    const numeric = money || field.kind === "percent";
+    return (
+      <Form.Item key={field.name} name={field.name} label={field.label} extra={field.description}
+        className={field.kind === "area" ? "field-wide" : undefined}
+        {...(numeric && {
+          getValueProps: (value?: string) => ({ value: money && !value ? null : Number(value || 0) / 100 }),
+          normalize: (value: number | null) => money && value === null ? "" : String(Math.round((value ?? 0) * 100)),
+        })}
+        rules={money ? [{ required: true, message: "请输入最低充值金额" }] :
+          field.required || (field.name === "registrationTurnstileSecret" && !hasTurnstileSecret)
+            ? [{ required: true, whitespace: true }] : undefined}>
+        {field.kind === "select" ? <Select options={field.options} />
+          : numeric ? <InputNumber min={money ? 0.01 : 0} max={money ? 1000000 : 100} precision={2}
+            step={money ? 0.01 : 1} suffix={money ? "元" : "%"} style={{ width: "100%" }} />
+          : field.kind === "secret" ? <Input.Password autoComplete="new-password" placeholder={
+            field.name === "registrationTurnstileSecret" && hasTurnstileSecret ? "已配置，留空保留" : undefined
+          } />
+          : field.kind === "area" ? <Input.TextArea rows={8} />
+          : <Input />}
+      </Form.Item>
+    );
+  }
+
   return (
     <section className="panel-table">
       <header className="page-head"><h1>站点设置</h1></header>
@@ -226,7 +255,8 @@ export default function Settings({ refresh, initialSection }: { refresh: () => P
           <Tabs tabPosition={desktop ? "left" : "top"} className="settings-sections" activeKey={section} onChange={setSection} items={[
             ...sections.map(({ key, label, match }) => ({
               key, label,
-              children: section === key && <Form form={form} layout="vertical" onFinish={save} onValuesChange={() => setDirty(true)}>
+              children: section === key && <>
+              <Form form={form} layout="vertical" onFinish={save} onValuesChange={() => setDirty(true)}>
                 {key === "diagnostics" ? <section className="probe-settings" aria-labelledby="probe-settings-title">
                   <header className="probe-settings-heading">
                     <span className="probe-settings-icon"><Activity size={19} aria-hidden="true" /></span>
@@ -243,25 +273,17 @@ export default function Settings({ refresh, initialSection }: { refresh: () => P
                   </Form.Item>
                 </section> : <div className="settings-fields">
                   {fields.filter((field) => match.test(field.name) &&
-                    (!field.name.startsWith("registrationTurnstile") || captchaType === "turnstile")).map((field) => (
-                    <Form.Item key={field.name} name={field.name} label={field.label}
-                      className={field.kind === "area" ? "field-wide" : undefined}
-                      {...(field.kind === "percent" && {
-                        getValueProps: (value: string) => ({ value: Number(value || 0) / 100 }),
-                        normalize: (value: number | null) => String(Math.round((value || 0) * 100)),
-                      })}
-                      rules={field.required || (field.name === "registrationTurnstileSecret" && !hasTurnstileSecret)
-                        ? [{ required: true, whitespace: true }] : undefined}>
-                      {field.kind === "select" ? <Select options={field.options} />
-                        : field.kind === "percent" ? <InputNumber min={0} max={100} precision={2} suffix="%" style={{ width: "100%" }} />
-                        : field.kind === "secret" ? <Input.Password autoComplete="new-password" placeholder={
-                          field.name === "registrationTurnstileSecret" && hasTurnstileSecret ? "已配置，留空保留" : undefined
-                        } />
-                        : field.kind === "area" ? <Input.TextArea rows={8} />
-                        : <Input />}
-                    </Form.Item>
-                  ))}
+                    (!field.name.startsWith("registrationTurnstile") || captchaType === "turnstile")).map(renderField)}
                 </div>}
+                {key === "payment" && configuredGateways.length > 0 && <Collapse
+                  className="legacy-payment-settings"
+                  defaultActiveKey={legacySection}
+                  items={configuredGateways.map(([kind, label]) => ({
+                    key: kind,
+                    label: `旧版 ${label} 配置`,
+                    children: <div className="settings-fields">{fields.filter(field => field.name.startsWith(kind)).map(renderField)}</div>,
+                  }))}
+                />}
                 {key === "announcement" && <section className="home-link-settings" aria-labelledby="home-link-settings-title">
                   <h2 id="home-link-settings-title" className="section-title">推广链接</h2>
                   <Form.List name="homeLinks">
@@ -294,9 +316,13 @@ export default function Settings({ refresh, initialSection }: { refresh: () => P
                     <Button type="primary" loading={saving} disabled={!dirty} htmlType="submit">保存设置</Button>
                   </Space>
                 </div>
-              </Form>,
+              </Form>
+              {key === "payment" && <section className="payment-channel-settings" aria-labelledby="payment-channels-title">
+                <h2 className="section-title" id="payment-channels-title">支付通道</h2>
+                <PaymentChannels />
+              </section>}
+              </>,
             })),
-            { key: "payment-channels", label: "支付通道", children: <PaymentChannels /> },
           ]} />
         </div>
       )}

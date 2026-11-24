@@ -66,6 +66,14 @@ func (s *Server) updateNodeBandwidth(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	rateKey := digest(token)
+	now := time.Now()
+	s.mu.RLock()
+	status := s.bandwidthUploadStatus(id, rateKey, now)
+	s.mu.RUnlock()
+	if status != http.StatusNoContent {
+		w.WriteHeader(status)
+		return
+	}
 	var metrics wire.Bandwidth
 	if !decodeLimit(w, r, &metrics, 512) {
 		return
@@ -75,22 +83,30 @@ func (s *Server) updateNodeBandwidth(w http.ResponseWriter, r *http.Request) {
 		fail(w, http.StatusBadRequest, "网卡流量数据无效")
 		return
 	}
-	now := time.Now()
+	now = time.Now()
 	s.mu.Lock()
-	state := s.nodeBandwidth[id]
-	node, present := s.devices[id]
-	status := http.StatusNoContent
-	switch {
-	case !present || state == nil || now.Sub(node.LastSeen) >= 30*time.Second ||
-		subtle.ConstantTimeCompare([]byte(state.credential), []byte(rateKey)) != 1:
-		status = http.StatusUnauthorized
-	case now.Sub(state.at) < 700*time.Millisecond:
-		status = http.StatusTooManyRequests
-	default:
+	status = s.bandwidthUploadStatus(id, rateKey, now)
+	if status == http.StatusNoContent {
+		state := s.nodeBandwidth[id]
 		state.metrics, state.at = metrics, now
 	}
 	s.mu.Unlock()
 	w.WriteHeader(status)
+}
+
+// The caller holds s.mu. Recheck after reading the body in case access changed.
+func (s *Server) bandwidthUploadStatus(id int64, credential string, now time.Time) int {
+	state := s.nodeBandwidth[id]
+	node, present := s.devices[id]
+	switch {
+	case !present || state == nil || now.Sub(node.LastSeen) >= 30*time.Second ||
+		subtle.ConstantTimeCompare([]byte(state.credential), []byte(credential)) != 1:
+		return http.StatusUnauthorized
+	case now.Sub(state.at) < 700*time.Millisecond:
+		return http.StatusTooManyRequests
+	default:
+		return http.StatusNoContent
+	}
 }
 
 func (s *Server) bandwidthUpdates(previous map[int64]wire.Device) []bandwidthEvent {
@@ -98,14 +114,19 @@ func (s *Server) bandwidthUpdates(previous map[int64]wire.Device) []bandwidthEve
 	now := time.Now()
 	s.mu.RLock()
 	defer s.mu.RUnlock()
-	for id := range previous {
+	if len(s.nodeBandwidth) == 0 {
+		return nil
+	}
+	for id, node := range previous {
+		if !node.Online {
+			continue
+		}
 		state := s.nodeBandwidth[id]
 		if state == nil || state.at.IsZero() || now.Sub(state.at) >= bandwidthFreshness {
 			continue
 		}
-		node := previous[id]
 		latest, present := s.devices[id]
-		if !node.Online || !present || node.GroupID != latest.GroupID ||
+		if !present || node.GroupID != latest.GroupID ||
 			now.Sub(latest.LastSeen) >= 30*time.Second || node.Metrics.Bandwidth == state.metrics {
 			continue
 		}

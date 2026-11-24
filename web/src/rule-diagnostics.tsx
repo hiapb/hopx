@@ -1,8 +1,9 @@
 import { useEffect, useState } from "react";
-import { Alert, Button, Modal, Pagination, Segmented, Spin, Tag, Tooltip } from "antd";
+import { Alert, Button, Modal, Pagination, Segmented, Spin, Tag } from "antd";
 import { Activity, ChevronLeft, ChevronRight, Clock3, Crosshair, GitBranch, RadioTower, RefreshCw, Route, Server } from "lucide-react";
 import { api } from "./api";
 import type { Rule } from "./api";
+import DismissibleTooltip from "./dismissible-tooltip";
 import { NodeFlag, nodeDisplayName } from "./node-location";
 import { relayModeLabel } from "./relay-protocols";
 
@@ -96,13 +97,13 @@ function HistoryChart({ points, range, label }: { points: Point[]; range: TimeRa
           const latency = item.totalMs / Math.max(1, item.attempts - item.failed);
           const color = !item.attempts ? "empty" : item.failed === item.attempts ? "down" : item.failed > 0 ? "degraded" : "up";
           return (
-            <Tooltip key={item.at} title={timestamp(item.at) + (item.attempts ? " · 丢包 " + loss(item) + " · " + average(item) : " · " + noMeasurement(item))}>
+            <DismissibleTooltip key={item.at} title={timestamp(item.at) + (item.attempts ? " · 丢包 " + loss(item) + " · " + average(item) : " · " + noMeasurement(item))}>
               <button type="button" className="diagnostic-bar" data-state={color} aria-pressed={item.at === point?.at}
                 aria-label={timestamp(item.at) + (item.attempts ? " 丢包 " + loss(item) : " " + noMeasurement(item))}
                 onClick={() => setSelection(item.at)}>
                 <span style={{ height: (color === "empty" ? 13 : Math.max(25, latency / maxLatency * 92)) + "%" }} />
               </button>
-            </Tooltip>
+            </DismissibleTooltip>
           );
         })}
       </div>

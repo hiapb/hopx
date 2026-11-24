@@ -13,6 +13,12 @@ import (
 	"hopx/internal/wire"
 )
 
+func startBandwidthReporting(parent context.Context, client *http.Client, panel, iface string, identity wire.Identity) context.CancelFunc {
+	ctx, cancel := context.WithCancel(parent)
+	go reportBandwidth(ctx, client, panel, iface, identity)
+	return cancel
+}
+
 func reportBandwidth(ctx context.Context, client *http.Client, panel, iface string, identity wire.Identity) {
 	sampler := networkSampler{iface: iface}
 	sampler.sample()
@@ -54,7 +60,7 @@ type procReader struct {
 	buffer [4096]byte
 }
 
-func (r *procReader) lines(path string, f func([]string)) {
+func (r *procReader) lines(path string, done func([]string) bool) {
 	file, e := os.Open(path)
 	if e != nil {
 		return
@@ -68,8 +74,8 @@ func (r *procReader) lines(path string, f func([]string)) {
 		for field := range strings.FieldsSeq(scan.Text()) {
 			fields = append(fields, field)
 		}
-		if len(fields) > 0 {
-			f(fields)
+		if len(fields) > 0 && done(fields) {
+			return
 		}
 	}
 }
@@ -85,9 +91,9 @@ func (s *sampler) sample(dir string) wire.Metrics {
 			m.FileLimit = limit.Cur
 		}
 	}
-	s.proc.lines("/proc/stat", func(f []string) {
+	s.proc.lines("/proc/stat", func(f []string) bool {
 		if f[0] != "cpu" || len(f) < 6 {
-			return
+			return false
 		}
 		var total uint64
 		for _, v := range f[1:min(len(f), 9)] {
@@ -98,26 +104,32 @@ func (s *sampler) sample(dir string) wire.Metrics {
 			m.CPU = clamp(100 * (1 - float64(idle-s.cpuIdle)/float64(total-s.cpuTotal)))
 		}
 		s.cpuTotal, s.cpuIdle = total, idle
+		return true
 	})
 	var mem, free uint64
-	s.proc.lines("/proc/meminfo", func(f []string) {
+	var hasAvailable bool
+	s.proc.lines("/proc/meminfo", func(f []string) bool {
 		if len(f) < 2 {
-			return
+			return false
 		}
 		switch f[0] {
 		case "MemTotal:":
 			mem = number(f[1])
 		case "MemAvailable:":
 			free = number(f[1])
+			hasAvailable = true
 		}
+		return mem > 0 && hasAvailable
 	})
 	if mem > 0 && free <= mem {
 		m.RAM = 100 * float64(mem-free) / float64(mem)
 	}
-	s.proc.lines("/proc/self/status", func(f []string) {
+	s.proc.lines("/proc/self/status", func(f []string) bool {
 		if len(f) > 1 && f[0] == "VmRSS:" {
 			m.RSS = int64(number(f[1]) * 1024)
+			return true
 		}
+		return false
 	})
 	raw, _ := os.ReadFile("/proc/uptime")
 	if values := strings.Fields(string(raw)); len(values) > 0 {
@@ -133,16 +145,20 @@ func (s *networkSampler) sample() wire.Bandwidth {
 	now := time.Now()
 	if s.iface == "" && !now.Before(s.refreshAt) {
 		var nic string
-		s.proc.lines("/proc/net/route", func(f []string) {
-			if len(f) > 1 && f[1] == "00000000" && f[0] != "lo" && nic == "" {
+		s.proc.lines("/proc/net/route", func(f []string) bool {
+			if len(f) > 1 && f[1] == "00000000" && f[0] != "lo" {
 				nic = f[0]
+				return true
 			}
+			return false
 		})
 		if nic == "" {
-			s.proc.lines("/proc/net/ipv6_route", func(f []string) {
-				if len(f) >= 10 && f[0] == "00000000000000000000000000000000" && f[1] == "00" && f[9] != "lo" && nic == "" {
+			s.proc.lines("/proc/net/ipv6_route", func(f []string) bool {
+				if len(f) >= 10 && f[0] == "00000000000000000000000000000000" && f[1] == "00" && f[9] != "lo" {
 					nic = f[9]
+					return true
 				}
+				return false
 			})
 		}
 		if s.defaultNIC != nic {
@@ -152,13 +168,13 @@ func (s *networkSampler) sample() wire.Bandwidth {
 		s.refreshAt = now.Add(30 * time.Second)
 	}
 	var sample wire.Bandwidth
-	s.proc.lines("/proc/net/dev", func(f []string) {
+	s.proc.lines("/proc/net/dev", func(f []string) bool {
 		if len(f) < 10 || !strings.HasSuffix(f[0], ":") {
-			return
+			return false
 		}
 		nic := strings.TrimSuffix(f[0], ":")
 		if nic == "lo" {
-			return
+			return false
 		}
 		if s.iface != "" {
 			selected := false
@@ -169,10 +185,10 @@ func (s *networkSampler) sample() wire.Bandwidth {
 				}
 			}
 			if !selected {
-				return
+				return false
 			}
 		} else if s.defaultNIC != "" && nic != s.defaultNIC {
-			return
+			return false
 		}
 		rx, rxErr := strconv.ParseInt(f[1], 10, 64)
 		tx, txErr := strconv.ParseInt(f[9], 10, 64)
@@ -181,6 +197,7 @@ func (s *networkSampler) sample() wire.Bandwidth {
 			sample.InBytes += rx
 			sample.OutBytes += tx
 		}
+		return s.iface == "" && s.defaultNIC != ""
 	})
 	if !sample.HasTotals {
 		s.last = time.Time{}

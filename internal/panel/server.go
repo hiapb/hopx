@@ -10,6 +10,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"io/fs"
 	"log/slog"
@@ -151,7 +152,7 @@ func Open(o Options) (*Server, error) {
 			"affiliate_balance": "INTEGER NOT NULL DEFAULT 0", "allow_device": "INTEGER NOT NULL DEFAULT 0",
 		},
 		"user_groups":            {"show_order": "INTEGER NOT NULL DEFAULT 0"},
-		"devices":                {"last_seen": "INTEGER NOT NULL DEFAULT 0", "in_bytes": "INTEGER", "out_bytes": "INTEGER"},
+		"devices":                {"last_seen": "INTEGER NOT NULL DEFAULT 0", "status_hidden_at": "INTEGER NOT NULL DEFAULT 0", "in_bytes": "INTEGER", "out_bytes": "INTEGER"},
 		"user_referral_settings": {"registration_enabled": "INTEGER NOT NULL DEFAULT 1"},
 		"payment_channels":       {"show_order": "INTEGER NOT NULL DEFAULT 0"},
 		"notifications":          {"topic": "TEXT NOT NULL DEFAULT ''"},
@@ -222,10 +223,32 @@ func digest(value string) string {
 	return hex.EncodeToString(h[:])
 }
 
+const (
+	minPasswordBytes = 10
+	maxPasswordBytes = 72
+)
+
+func validatePasswordLength(password string) error {
+	size := len(password)
+	switch {
+	case size == 0:
+		return errors.New("请输入密码")
+	case size < minPasswordBytes:
+		return fmt.Errorf("密码太短，至少需要 %d 字节（当前 %d 字节）", minPasswordBytes, size)
+	case size > maxPasswordBytes:
+		return fmt.Errorf("密码太长，最多允许 %d 字节（当前 %d 字节）", maxPasswordBytes, size)
+	default:
+		return nil
+	}
+}
+
 func (s *Server) addUser(name, password string, admin bool, inviter sql.NullInt64) error {
 	name = strings.TrimSpace(name)
-	if len(name) < 2 || len(name) > 64 || len(password) < 10 || len(password) > 72 {
-		return errors.New("账号须为 2–64 字节，密码须为 10–72 字节")
+	if len(name) < 2 || len(name) > 64 {
+		return errors.New("账号须为 2–64 字节")
+	}
+	if err := validatePasswordLength(password); err != nil {
+		return err
 	}
 	hash, err := bcrypt.GenerateFromPassword([]byte(password), bcrypt.DefaultCost)
 	if err != nil {
@@ -399,6 +422,10 @@ func (s *Server) register(w http.ResponseWriter, r *http.Request) {
 		fail(w, 403, "注册已关闭")
 		return
 	}
+	if err := validatePasswordLength(input.Password); err != nil {
+		fail(w, 400, err.Error())
+		return
+	}
 	switch config.kind {
 	case verificationOff:
 	case verificationArithmetic:
@@ -540,10 +567,12 @@ func (s *Server) site(w http.ResponseWriter, r *http.Request) {
 	respond(w, 200, map[string]any{
 		"name": s.setting("name", "HopX"), "announcement": s.setting("announcement", ""), "homeLinks": homeLinks,
 		"registration": registration.mode, "registrationVerification": registration.kind,
-		"registrationChallenge": strconv.FormatBool(registration.kind == verificationArithmetic), "registrationTurnstileSiteKey": turnstileSiteKey,
+		"registrationPasswordBytes": map[string]int{"min": minPasswordBytes, "max": maxPasswordBytes},
+		"registrationChallenge":     strconv.FormatBool(registration.kind == verificationArithmetic), "registrationTurnstileSiteKey": turnstileSiteKey,
 		"personalTunnels": s.setting("personalTunnels", "false"), "epay": strconv.FormatBool(slices.Contains(available, "epay")),
 		"paymentGateways": strings.Join(available, ","), "paymentFees": fees, "paymentChannels": options, "minRecharge": s.setting("minRecharge", "100"), "version": s.version,
 		"lookingGlass":      s.setting("lookingGlass", "false"),
+		"showAdminNodeIPs":  s.setting("hideAdminIPs", "false") != "true",
 		"ruleProbeInterval": s.setting("ruleProbeInterval", "300"),
 		"showShop":          s.setting("showShop", "true"), "showOrders": s.setting("showOrders", "true"),
 		"showNodeStatus": s.setting("showNodeStatus", "true"), "invitesEnabled": s.setting("invitesEnabled", "true"),
@@ -604,6 +633,7 @@ func (s *Server) Handler() http.Handler {
 	user("GET /api/nodes/{id}/history", s.probeHistory)
 	user("POST /api/nodes/{id}/diagnose", s.probeDiagnose)
 	user("POST /api/nodes/{id}/ping", s.probePing)
+	admin("GET /api/nodes/{id}/connectivity/rules", s.probeRuleOptions)
 	user("POST /api/nodes/{id}/connectivity", s.probeConnectivity)
 	user("PATCH /api/nodes/{id}", s.editNode)
 	user("GET /api/rules", s.listRules)
@@ -660,8 +690,9 @@ func (s *Server) Handler() http.Handler {
 	admin("POST /api/admin/groups/{id}/enrollment", s.enrollment)
 	user("POST /api/groups/{id}/operations", s.groupOperations)
 	admin("GET /api/admin/groups/{id}/configuration", s.nodeConfigSummary)
-	user("DELETE /api/nodes/{id}", s.deleteNode)
+	admin("DELETE /api/nodes/{id}", s.deleteNode)
 	admin("DELETE /api/admin/nodes/{id}", s.deleteNode)
+	admin("POST /api/admin/nodes/{id}/hide-status", s.hideOfflineNode)
 	admin("GET /api/admin/node-rollout", s.nodeRolloutStatus)
 	admin("POST /api/admin/node-rollout/resume", s.resumeNodeRollout)
 	admin("POST /api/admin/plans", s.savePlan)

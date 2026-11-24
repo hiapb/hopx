@@ -57,9 +57,13 @@ func TestNodeAddressesAndCredentialsStayScoped(t *testing.T) {
 	}
 	giveFixtureUsersActivePlan(t, s)
 	_, err = s.db.Exec(`
+		INSERT INTO user_groups(id,name) VALUES (1,'Members');
+		UPDATE plans SET group_id=1 WHERE id=1;
+		UPDATE users SET group_id=1 WHERE id=2;
+		INSERT INTO settings(key,value) VALUES ('hideIPs','false');
 		INSERT INTO groups(id,name,kind,first_port,last_port,ratio,user_group,offline_seconds,owner) VALUES
-			(1,'site entry','entry',10000,20000,1000,0,30,0),
-			(2,'site exit','exit',10000,20000,1000,0,30,0),
+			(1,'site entry','entry',10000,20000,1000,1,30,0),
+			(2,'site exit','exit',10000,20000,1000,1,30,0),
 			(3,'personal exit','exit',10000,20000,1000,0,30,2);
 		INSERT INTO devices(id,group_id,token,registration) VALUES
 			(1,1,'one','{"name":"site entry","address":"origin.example","ipv4":"192.0.2.1","reverseAddress":"relay.example:443","reverseToken":"fixture-secret","reverseCertificate":"fixture-cert"}'),
@@ -72,20 +76,34 @@ func TestNodeAddressesAndCredentialsStayScoped(t *testing.T) {
 		t.Fatal(err)
 	}
 	rec := httptest.NewRecorder()
-	s.listNodes(rec, httptest.NewRequest(http.MethodGet, "/api/nodes", nil), User{ID: 2})
+	member := User{ID: 2, Group: 1}
+	s.listNodes(rec, httptest.NewRequest(http.MethodGet, "/api/nodes", nil), member)
 	body := rec.Body.String()
-	if rec.Code != 200 || !strings.Contains(body, "192.0.2.3") {
-		t.Fatal("personal node should remain visible to its owner")
+	if rec.Code != 200 || !strings.Contains(body, `"name":"personal exit"`) || !strings.Contains(body, `"name":"site exit"`) {
+		t.Fatal("node status should include personal and plan-assigned nodes")
 	}
-	for _, forbidden := range []string{"origin.example", "192.0.2.1", "192.0.2.2", "relay.example", "fixture-secret", "fixture-relay-secret"} {
+	for _, forbidden := range []string{"origin.example", "192.0.2.1", "192.0.2.2", "192.0.2.3", "relay.example", "fixture-secret", "fixture-relay-secret"} {
 		if strings.Contains(body, forbidden) {
-			t.Fatal("site node exposed a hidden address or credential")
+			t.Fatal("member node status exposed an address or credential")
 		}
+	}
+	personal, err := s.visibleDevices(member, 3)
+	if err != nil || len(personal) != 1 || personal[0].IPv4 != "192.0.2.3" {
+		t.Fatal("owners should retain addresses in their personal device management")
 	}
 	rec = httptest.NewRecorder()
 	s.listNodes(rec, httptest.NewRequest(http.MethodGet, "/api/nodes", nil), User{ID: 1, Admin: true})
 	if strings.Contains(rec.Body.String(), "fixture-secret") || !strings.Contains(rec.Body.String(), "192.0.2.2") {
 		t.Fatal("administrator should see display addresses only")
+	}
+	if _, err := s.db.Exec("INSERT INTO settings(key,value) VALUES ('hideAdminIPs','true')"); err != nil {
+		t.Fatal(err)
+	}
+	s.invalidateNodeStatus("PUT /api/admin/settings")
+	rec = httptest.NewRecorder()
+	s.listNodes(rec, httptest.NewRequest(http.MethodGet, "/api/nodes", nil), User{ID: 1, Admin: true})
+	if rec.Code != 200 || strings.Contains(rec.Body.String(), "192.0.2.") {
+		t.Fatal("administrator node status exposed hidden addresses")
 	}
 	if endpoints, err := s.reverseEndpoints(2, "egress-a"); err != nil || len(endpoints) != 0 {
 		t.Fatalf("unexpected reverse authorizations: count %d, error %v", len(endpoints), err)

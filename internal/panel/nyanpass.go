@@ -247,7 +247,6 @@ func nyanpassSettings(tx *sql.Tx) (map[string]string, error) {
 			}
 			settings["registrationChallenge"] = strconv.FormatBool(info.RegisterChallenge == 1)
 			settings["personalTunnels"] = strconv.FormatBool(info.AllowPersonal)
-			settings["hideIPs"] = strconv.FormatBool(info.HideIP > 0)
 			settings["hideAdminIPs"] = strconv.FormatBool(info.HideIP == 2)
 		case "site_notice":
 			settings["announcement"] = value

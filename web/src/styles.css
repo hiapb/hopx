@@ -251,6 +251,14 @@ button:focus-visible, a:focus-visible { outline: 2px solid var(--accent); outlin
 }
 
 .home-page { min-width: 0; }
+.home-welcome {
+  margin-bottom: 14px;
+  color: var(--text);
+  font-size: clamp(20px, 2.2vw, 26px);
+  font-weight: 700;
+  line-height: 1.3;
+  overflow-wrap: anywhere;
+}
 .home-notice {
   background: var(--subtle);
   border: 1px solid var(--line);
@@ -259,16 +267,9 @@ button:focus-visible, a:focus-visible { outline: 2px solid var(--accent); outlin
 }
 .home-notice-heading {
   display: flex;
-  flex-wrap: wrap;
   align-items: center;
-  justify-content: space-between;
-  gap: 10px 14px;
-}
-.home-notice-heading h1 {
-  display: flex;
-  align-items: center;
-  gap: 10px;
-  font-size: clamp(20px, 2vw, 24px);
+  gap: 8px;
+  font-size: 16px;
   font-weight: 680;
 }
 .home-notice-heading svg { color: var(--accent); flex: none; }
@@ -512,7 +513,9 @@ button:focus-visible, a:focus-visible { outline: 2px solid var(--accent); outlin
 .node-country-flag { width: 20px; height: 15px; flex: none; border-radius: 2px; outline: 1px solid var(--line); }
 .probe-status { display: inline-flex; align-items: center; gap: 4px; white-space: nowrap; color: var(--muted); font-size: 13px; }
 .probe-status.online { color: var(--online); }
+.probe-status.offline { color: var(--error); }
 .probe-status .status-dot { width: 5px; height: 5px; flex-basis: 5px; }
+.probe-status.offline .status-dot { background: var(--error); }
 .probe-addresses { display: grid; justify-items: start; gap: 0; min-width: 0; line-height: 1.35; overflow-wrap: anywhere; }
 .probe-addresses button { display: inline; max-width: 100%; color: var(--muted); }
 .node-table .probe-addresses .mono { font-size: 13px; }
@@ -527,8 +530,9 @@ button:focus-visible, a:focus-visible { outline: 2px solid var(--accent); outlin
 .probe-track i { display: block; height: 100%; border-radius: inherit; background: color-mix(in srgb, var(--online) 30%, transparent); }
 .probe-track i.warn { background: var(--warning); }
 .probe-actions { display: flex; justify-content: flex-end; gap: 3px; }
-.probe-actions .ant-btn { color: var(--muted); }
+.probe-actions .ant-btn:not(.ant-btn-dangerous) { color: var(--muted); }
 .node-table .probe-actions .ant-btn { width: 30px; height: 30px; }
+.node-table .probe-actions .probe-ping-action { width: auto; padding-inline: 5px; color: var(--accent); font-weight: 600; }
 .probe-empty {
   display: grid;
   justify-items: center;
@@ -546,7 +550,6 @@ button:focus-visible, a:focus-visible { outline: 2px solid var(--accent); outlin
 .probe-drawer .probe-detail-grid > dl:not(.probe-resources) { padding-block: 4px; }
 .probe-detail-resources { grid-column: 1 / -1; padding: 12px; border: 1px solid var(--line); border-radius: 8px; background: var(--subtle); }
 .probe-detail-bandwidth { grid-column: 1 / -1; padding: 12px; border: 1px solid var(--line); border-radius: 8px; background: var(--subtle); }
-.probe-detail-bandwidth .muted { margin-top: 8px; font-size: 12px; }
 .probe-history { margin-top: 18px; padding-top: 14px; border-top: 1px solid var(--line); }
 .probe-history h3 { font-size: 14px; margin: 0 0 12px; }
 .probe-history-bars {
@@ -1260,6 +1263,32 @@ textarea.dialog-code.ant-input:hover, textarea.dialog-code.ant-input:focus { bor
   .page-head h1 { font-size: 21px; }
   .account > span:last-child { display: none; }
   .rules-table .ant-table-tbody tr > td { padding-inline: 9px; }
+  .table-section .operator-toolbar { display: grid; grid-template-columns: minmax(0, 1fr); gap: 6px; }
+  .table-section .operator-toolbar > .operator-actions:empty { display: none; }
+  :is(.table-section, .settings-page) :is(.operator-filters, .operator-actions.ant-space, .operator-actions > .ant-space, .list-toolbar, .batch-toolbar) {
+    display: flex;
+    flex-wrap: nowrap;
+    justify-content: flex-start;
+    gap: 6px;
+    max-width: 100%;
+    overflow-x: auto;
+    padding: 3px 2px 5px;
+    scrollbar-width: thin;
+    scrollbar-color: var(--scroll-thumb) transparent;
+    overscroll-behavior-x: contain;
+  }
+  :is(.table-section, .settings-page) :is(.operator-filters, .operator-actions.ant-space, .operator-actions > .ant-space, .list-toolbar, .batch-toolbar) > .ant-space-item {
+    flex: none;
+    white-space: nowrap;
+  }
+  .table-section .batch-toolbar { padding-inline: 8px; }
+  .content > .table-section:only-child > .table-footer { margin-top: 4px; }
+  .table-section .page-head > .ant-space { flex: none; flex-wrap: nowrap; gap: 4px; }
+  .rules-table > .page-head h1 { overflow-wrap: anywhere; }
+  .rules-table > .page-head .ant-btn { padding-inline: 7px; }
+  .rules-table > .page-head .refresh-button { min-inline-size: 0; }
+  :is(.table-section, .node-section, .ant-drawer, .settings-page) .ant-table-content { overscroll-behavior-x: contain; }
+  .node-table .probe-node .data-title > span { white-space: nowrap; display: block; }
 }
 @media (max-width: 490px) {
   .equipment-editor, .rule-editor .details-grid { grid-template-columns: 1fr; gap: 0; }
@@ -1327,6 +1356,8 @@ textarea.dialog-code.ant-input:hover, textarea.dialog-code.ant-input:focus { bor
 .settings-fields .field-wide { grid-column: 1 / -1; }
 .home-link-settings { border-top: 1px solid var(--line); padding-block: 16px; }
 .home-link-settings h2 { margin-bottom: 12px; }
+.legacy-payment-settings { margin-bottom: 16px; }
+.payment-channel-settings { margin-top: 20px; }
 .home-link-field {
   display: grid;
   grid-template-columns: minmax(0, 1fr) minmax(0, 2fr) auto;

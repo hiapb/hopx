@@ -1,5 +1,5 @@
-import { useEffect, useMemo, useState } from "react";
-import { Alert, App, Button, Drawer, Grid, Input, InputNumber, Select, Space, Spin, Table, Tooltip } from "antd";
+import { memo, useEffect, useMemo, useRef, useState } from "react";
+import { Alert, App, Button, Drawer, Grid, Input, Modal, Select, Space, Spin, Table } from "antd";
 import type { TableColumnsType } from "antd";
 import {
   Activity,
@@ -11,9 +11,12 @@ import {
   Server,
   Search,
   Stethoscope,
+  Trash2,
 } from "lucide-react";
 import { api, bytes, date, useData } from "./api";
 import type { Group, Node, NodeBandwidth, User } from "./api";
+import { useConfirmAction } from "./confirm-action";
+import DismissibleTooltip from "./dismissible-tooltip";
 import IconAction from "./icon-action";
 import { NodeFlag, nodeDisplayName, nodeRegion } from "./node-location";
 
@@ -61,14 +64,14 @@ function TrafficValue({ bandwidth, direction, online = true, node, narrow }: {
   const rate = online ? speed(bandwidth[direction.rate]) : "—";
   const [rateValue, unit] = rate.split(" ");
   const total = bandwidth.hasTotals ? bytes(bandwidth[direction.total]) : "—";
-  return <Tooltip trigger={narrow ? ["click"] : ["hover", "focus"]} destroyOnHidden title={<div>
+  return <DismissibleTooltip clickToOpen={narrow} title={<div>
     <div>{direction.cumulative} {total}</div>
     {node && <div>连接数 · TCP {node.metrics.tcpConnections ?? 0} / UDP {node.metrics.udpSessions ?? 0}</div>}
   </div>}>
     <button type="button" className="button-link probe-rate" aria-label={`${direction.label} ${rate}，${direction.cumulative} ${total}`}>
       {rateValue}{unit && <> <span className="probe-rate-unit">{unit}</span></>}
     </button>
-  </Tooltip>;
+  </DismissibleTooltip>;
 }
 
 function TrafficRates({ bandwidth, online = true }: { bandwidth: NodeBandwidth; online?: boolean }) {
@@ -84,7 +87,7 @@ function TrafficRates({ bandwidth, online = true }: { bandwidth: NodeBandwidth; 
 }
 
 function NodeStatus({ online }: { online: boolean }) {
-  return <span className={online ? "probe-status online" : "probe-status"}>
+  return <span className={online ? "probe-status online" : "probe-status offline"}>
     <i aria-hidden="true" className={online ? "status-dot online" : "status-dot"} />{online ? "在线" : "离线"}
   </span>;
 }
@@ -118,10 +121,101 @@ type Sample = {
 type Diagnostic = { status: string; detail: string; age: number };
 type NodeRollout = { version: string; node?: number; name?: string; phase: string; reason?: string };
 
-export default function Nodes({ user, lookingGlass }: { user: User; lookingGlass: boolean }) {
+type ConnectivityRule = { id: number; name: string; port: number };
+type ConnectivityResult = { connected: boolean; latencyMs: number; backup?: boolean };
+
+const ConnectivityTest = memo(function ConnectivityTest({ nodeID }: { nodeID: number }) {
+  const [open, setOpen] = useState(false);
+  const [search, setSearch] = useState("");
+  const [ruleOptions, setRuleOptions] = useState<{ query: string; items?: ConnectivityRule[]; error?: string }>();
+  const [selected, setSelected] = useState<{ value: number; label: string }>();
+  const [result, setResult] = useState<ConnectivityResult>();
+  const [error, setError] = useState("");
+  const [pending, setPending] = useState(false);
+  const testRequest = useRef<AbortController | undefined>(undefined);
+  const path = "/nodes/" + nodeID + "/connectivity";
+  const query = search.trim();
+  const currentOptions = ruleOptions?.query === query ? ruleOptions : undefined;
+  const loadingRules = open && !currentOptions;
+
+  useEffect(() => {
+    if (!open) return;
+    const request = new AbortController();
+    const timer = window.setTimeout(async () => {
+      try {
+        const items = await api<ConnectivityRule[]>(path + "/rules?q=" + encodeURIComponent(query), "GET", undefined, request.signal);
+        if (!request.signal.aborted) setRuleOptions({ query, items });
+      } catch (e) {
+        if (!request.signal.aborted) setRuleOptions({ query, error: (e as Error).message });
+      }
+    }, query ? 250 : 0);
+    return () => {
+      window.clearTimeout(timer);
+      request.abort();
+    };
+  }, [open, path, query]);
+
+  useEffect(() => () => testRequest.current?.abort(), []);
+
+  async function testRule() {
+    if (!selected || testRequest.current) return;
+    const request = new AbortController();
+    testRequest.current = request;
+    setPending(true);
+    setError("");
+    setResult(undefined);
+    try {
+      const response = await api<ConnectivityResult>(path, "POST", { ruleId: selected.value }, request.signal);
+      if (!request.signal.aborted) setResult(response);
+    } catch (e) {
+      if (!request.signal.aborted) setError((e as Error).message);
+    } finally {
+      testRequest.current = undefined;
+      if (!request.signal.aborted) setPending(false);
+    }
+  }
+
+  return <div className="probe-history">
+    <h3>转发链路诊断</h3>
+    <Space.Compact block>
+      <Select aria-label="搜索转发规则" placeholder="搜索规则名称或监听端口" style={{ flex: 1, minWidth: 0 }}
+        showSearch allowClear labelInValue filterOption={false} value={selected} disabled={pending}
+        searchValue={search} onSearch={setSearch}
+        onOpenChange={visible => {
+          setOpen(visible);
+          if (!visible) {
+            setSearch("");
+            setRuleOptions(undefined);
+          }
+        }}
+        onChange={value => {
+          setSelected(value);
+          setResult(undefined);
+          setError("");
+        }}
+        loading={loadingRules}
+        options={currentOptions?.items?.map(rule => ({
+          value: rule.id,
+          label: (rule.name || "未命名规则") + " · 端口 " + rule.port,
+        })) ?? []}
+        notFoundContent={loadingRules ? <Spin size="small" /> : currentOptions?.error ||
+          (query ? "未找到匹配的规则" : "此节点暂无可诊断的 TCP 规则")} />
+      <Button onClick={() => void testRule()} disabled={!selected} loading={pending}>测试 TCP 链路</Button>
+    </Space.Compact>
+    {(error || result) && <Alert style={{ marginTop: 12 }}
+      type={error ? "error" : result?.connected ? "success" : "warning"}
+      message={error || (result?.connected
+        ? (result.backup ? "备用链路已接通" : "链路已接通") + " · " + result.latencyMs + " ms"
+        : "目标连接失败")} />}
+  </div>;
+});
+
+export default function Nodes({ user, lookingGlass, showExitIP }: { user: User; lookingGlass: boolean; showExitIP: boolean }) {
   const screens = Grid.useBreakpoint();
   const narrow = !screens.lg;
+  const mobile = screens.md === false;
   const { message } = App.useApp();
+  const confirmAction = useConfirmAction();
   const [rollout, setRollout] = useState<NodeRollout>();
   const [resumingRollout, setResumingRollout] = useState(false);
   useEffect(() => {
@@ -130,8 +224,13 @@ export default function Nodes({ user, lookingGlass }: { user: User; lookingGlass
     let timer: number;
     async function refreshRollout() {
       try {
-        const result = await api<NodeRollout>("/admin/node-rollout", "GET", undefined, request.signal);
-        if (!request.signal.aborted) setRollout(result);
+        if (!document.hidden) {
+          const result = await api<NodeRollout>("/admin/node-rollout", "GET", undefined, request.signal);
+          if (!request.signal.aborted) {
+            setRollout(current => current?.version === result.version && current.node === result.node &&
+              current.name === result.name && current.phase === result.phase && current.reason === result.reason ? current : result);
+          }
+        }
       } catch {
         // The next refresh can recover from a transient panel restart.
       } finally {
@@ -165,41 +264,55 @@ export default function Nodes({ user, lookingGlass }: { user: User; lookingGlass
   const [diagnostic, setDiagnostic] = useState<Diagnostic>();
   const [diagBusy, setDiagBusy] = useState(false);
   const [diagError, setDiagError] = useState("");
-  const [ruleID,setRuleID]=useState<number|null>();
-  const [probeResult, setProbeResult] = useState<{ connected: boolean; latencyMs: number; backup?: boolean }>();
-  const [probePending,setProbePending]=useState(false);
+  const [pingNodeID, setPingNodeID] = useState<number>();
   const [pingHost, setPingHost] = useState("");
   const [pingPending, setPingPending] = useState(false);
   const [pingResult, setPingResult] = useState<{ id: number; text: string; ok: boolean }>();
-  async function ping(nodeID: number) {
-    if (!pingHost.trim()) return;
+  const pingNode = pingNodeID === undefined ? undefined : nodes[pingNodeID];
+  const canPing = Boolean(lookingGlass && pingNode?.online && pingNode.acceptPing);
+  const pingRequest = useRef<AbortController | undefined>(undefined);
+  useEffect(() => () => pingRequest.current?.abort(), []);
+
+  function closePing() {
+    pingRequest.current?.abort();
+    pingRequest.current = undefined;
+    setPingNodeID(undefined);
+    setPingPending(false);
+  }
+
+  async function ping() {
+    if (!pingNode || !canPing || !pingHost.trim() || pingRequest.current) return;
+    const nodeID = pingNode.id;
+    const request = new AbortController();
+    pingRequest.current = request;
     setPingResult(undefined);
     setPingPending(true);
     try {
       const result = await api<{ connected: boolean; latencyMs: number; address?: string; error?: string }>(
-        "/nodes/" + nodeID + "/ping", "POST", { host: pingHost.trim() },
+        "/nodes/" + nodeID + "/ping", "POST", { host: pingHost.trim() }, request.signal,
       );
       const label = result.connected ? "Ping 成功 · " + result.latencyMs + " ms" : result.error || "未收到 Ping 响应";
-      setPingResult({ id: nodeID, ok: result.connected, text: label + (result.address ? " · " + result.address : "") });
+      if (!request.signal.aborted) setPingResult({ id: nodeID, ok: result.connected, text: label + (result.address ? " · " + result.address : "") });
     } catch (error) {
-      setPingResult({ id: nodeID, ok: false, text: (error as Error).message });
+      if (!request.signal.aborted) setPingResult({ id: nodeID, ok: false, text: (error as Error).message });
     } finally {
-      setPingPending(false);
+      if (pingRequest.current === request) {
+        pingRequest.current = undefined;
+        setPingPending(false);
+      }
     }
   }
   const groups = useData<Group[]>("/groups?online=1", []);
   useEffect(() => {
-    let active = true;
+    const request = new AbortController();
     setHistory([]);
     if (detail !== undefined)
-      void api<Sample[]>("/nodes/" + detail + "/history")
+      void api<Sample[]>("/nodes/" + detail + "/history", "GET", undefined, request.signal)
         .then((samples) => {
-          if (active) setHistory(samples);
+          if (!request.signal.aborted) setHistory(samples);
         })
         .catch(() => undefined);
-    return () => {
-      active = false;
-    };
+    return () => request.abort();
   }, [detail]);
   async function diagnose(id: number) {
     setDetail(id);
@@ -215,19 +328,6 @@ export default function Nodes({ user, lookingGlass }: { user: User; lookingGlass
     } finally {
       setDiagBusy(false);
     }
-  }
-  useEffect(()=>{
-    setProbeResult(undefined);
-    setRuleID(null);
-  },[detail])
-  async function testTarget(id:number){
-    if(!ruleID)return;
-    setProbeResult(undefined);
-    setDiagError("");
-    setProbePending(true);
-    try{setProbeResult(await api<{connected:boolean;latencyMs:number;backup?:boolean}>("/nodes/"+id+"/connectivity","POST",{ruleId:ruleID}))}
-    catch(e){setDiagError((e as Error).message)}
-    finally{setProbePending(false)}
   }
   useEffect(() => {
     let stream: EventSource | undefined;
@@ -300,7 +400,7 @@ export default function Nodes({ user, lookingGlass }: { user: User; lookingGlass
       document.removeEventListener("visibilitychange", updateStream);
     };
   }, []);
-  const visibleGroups = groups.value.filter(g => g.onlineDevices !== undefined);
+  const visibleGroups = useMemo(() => groups.value.filter(g => g.onlineDevices !== undefined), [groups.value]);
   const byGroup = useMemo(() => {
     const grouped = new Map<number, Node[]>();
     for (const node of Object.values(nodes)) {
@@ -317,8 +417,10 @@ export default function Nodes({ user, lookingGlass }: { user: User; lookingGlass
   const filtered = group !== undefined || Boolean(searchTerm) || online !== "all";
   const shown = visibleGroups.filter(g => group === undefined || g.id === group).flatMap(group => {
     const all = byGroup.get(group.id) ?? [];
-    const matches = all.filter(node => (online === "all" || node.online === (online === "online")) &&
-      [node.name, nodeDisplayName(node), nodeRegion(node), node.countryCode, node.region, node.ipv4, node.ipv6, node.address].some(value => value?.toLowerCase().includes(searchTerm)));
+    const matches = online === "all" && !searchTerm ? all : all.filter(node =>
+      (online === "all" || node.online === (online === "online")) &&
+      (!searchTerm || [node.name, nodeDisplayName(node), nodeRegion(node), node.countryCode, node.region, node.ipv4, node.ipv6, node.address]
+        .some(value => value?.toLowerCase().includes(searchTerm))));
     return matches.length || ((user.admin || group.owner === user.id) && !searchTerm && online === "all")
       ? [{ group, all, matches }]
       : [];
@@ -366,17 +468,61 @@ export default function Nodes({ user, lookingGlass }: { user: User; lookingGlass
     </div>;
   }
 
-  function renderActions(id: number) {
+  function hideOfflineNode(node: Node) {
+    confirmAction({
+      title: "从状态列表移除 " + nodeDisplayName(node) + "？",
+      content: "节点的接入记录会保留。恢复心跳后，它会自动回到列表。",
+      okText: "移除",
+      onOk: async () => {
+        try {
+          await api("/admin/nodes/" + node.id + "/hide-status", "POST");
+          setNodes(current => {
+            if (current[node.id]?.online) return current;
+            const next = { ...current };
+            delete next[node.id];
+            return next;
+          });
+          setDetail(current => current === node.id ? undefined : current);
+          message.success("已从状态列表移除");
+          return true;
+        } catch (error) {
+          message.error((error as Error).message);
+          return false;
+        }
+      },
+    });
+  }
+
+  function renderActions(node: Node) {
+    const canRemove = user.admin && !node.online;
     return <div className="probe-actions">
-      <IconAction label="诊断" icon={<Stethoscope size={16} />} onClick={() => void diagnose(id)} />
-      <IconAction label="详情" icon={<ChevronRight size={17} />} onClick={() => showDetails(id)} />
+      {node.online && (user.admin || lookingGlass) && <Button
+        type="link" size="small" className="probe-ping-action"
+        onClick={() => {
+          setPingHost("");
+          setPingResult(undefined);
+          setPingNodeID(node.id);
+        }}>Ping</Button>}
+      {canRemove
+        ? <IconAction danger label="从状态列表移除" icon={<Trash2 size={16} />} onClick={() => hideOfflineNode(node)} />
+        : <IconAction label="诊断" icon={<Stethoscope size={16} />} onClick={() => void diagnose(node.id)} />}
+      <IconAction label="详情" icon={<ChevronRight size={17} />} onClick={() => showDetails(node.id)} />
     </div>;
   }
 
+  const addressColumn: TableColumnsType<Node>[number] = {
+    title: "出口 IP",
+    key: "address",
+    width: mobile ? 148 : screens.xl ? "18%" : "15%",
+    shouldCellUpdate: (node, previous) =>
+      node.address !== previous.address || node.ipv4 !== previous.ipv4 || node.ipv6 !== previous.ipv6,
+    render: (_, node) => renderAddresses(node) || "—",
+  };
   const columns: TableColumnsType<Node> = [
     {
       title: narrow ? "节点" : "节点 / 地区",
       key: "name",
+      width: mobile ? 120 : undefined,
       render: (_, node) => {
         const name = nodeDisplayName(node);
         return <div className="probe-node">
@@ -387,15 +533,8 @@ export default function Nodes({ user, lookingGlass }: { user: User; lookingGlass
         </div>;
       },
     },
+    ...(!narrow && showExitIP ? [addressColumn] : []),
     ...(!narrow ? [
-      {
-        title: "出口 IP",
-        key: "address",
-        width: screens.xl ? "18%" : "15%",
-        shouldCellUpdate: (node: Node, previous: Node) =>
-          node.address !== previous.address || node.ipv4 !== previous.ipv4 || node.ipv6 !== previous.ipv6,
-        render: (_: unknown, node: Node) => renderAddresses(node) || "—",
-      },
       {
         title: "状态",
         key: "status",
@@ -406,7 +545,7 @@ export default function Nodes({ user, lookingGlass }: { user: User; lookingGlass
     ...trafficDirections.map(direction => ({
       title: direction.label,
       key: `${direction.rate}-${narrow ? "mobile" : "desktop"}`,
-      width: narrow ? "25%" : screens.xl ? 105 : 90,
+      width: mobile ? 84 : narrow ? "25%" : screens.xl ? 105 : 90,
       className: "probe-rate-cell",
       align: "right" as const,
       shouldCellUpdate: (node: Node, previous: Node) =>
@@ -417,11 +556,12 @@ export default function Nodes({ user, lookingGlass }: { user: User; lookingGlass
         node.metrics.udpSessions !== previous.metrics.udpSessions,
       render: (_: unknown, node: Node) => <TrafficValue bandwidth={node.metrics} direction={direction} online={node.online} node={node} narrow={narrow} />,
     })),
-    ...(!narrow ? [
+    ...(narrow && showExitIP ? [addressColumn] : []),
+    ...(!narrow || mobile ? [
       ...resources.map(([metric, label]) => ({
         title: label,
         key: metric,
-        width: screens.xl ? "8%" : "6%",
+        width: mobile ? 68 : screens.xl ? "8%" : "6%",
         shouldCellUpdate: (node: Node, previous: Node) => node.online !== previous.online || node.metrics[metric] !== previous.metrics[metric],
         render: (_: unknown, node: Node) => <ResourceMeter node={node} metric={metric} />,
       })),
@@ -436,8 +576,8 @@ export default function Nodes({ user, lookingGlass }: { user: User; lookingGlass
       title: "操作",
       key: "action",
       align: "right",
-      width: narrow ? 72 : 76,
-      render: (_, node) => renderActions(node.id),
+      width: user.admin || lookingGlass ? 112 : narrow ? 72 : 76,
+      render: (_, node) => renderActions(node),
     },
   ];
 
@@ -542,6 +682,7 @@ export default function Nodes({ user, lookingGlass }: { user: User; lookingGlass
                   size="small"
                   rowKey="id"
                   tableLayout="fixed"
+                  scroll={mobile ? { x: (showExitIP ? 780 : 632) + (user.admin || lookingGlass ? 40 : 0) } : undefined}
                   dataSource={matches}
                   pagination={matches.length > 25 ? { pageSize: 25, hideOnSinglePage: true, size: "small" } : false}
                   columns={columns}
@@ -584,7 +725,6 @@ export default function Nodes({ user, lookingGlass }: { user: User; lookingGlass
             <div className="probe-detail-resources"><ResourceUsage node={active} /></div>
             <div className="probe-detail-bandwidth">
               <TrafficRates bandwidth={active.metrics} online={active.online} />
-              <p className="muted">累计流量取自节点网卡，网卡计数重置后重新累计。</p>
             </div>
             <dl>
               <dt>地区</dt>
@@ -592,12 +732,12 @@ export default function Nodes({ user, lookingGlass }: { user: User; lookingGlass
             </dl>
             <dl>
               <dt>最近上报</dt>
-              <dd>{date(Date.parse(active.lastSeen) / 1000)}</dd>
+              <dd>{Date.parse(active.lastSeen) > 0 ? date(Date.parse(active.lastSeen) / 1000) : "尚未上报"}</dd>
             </dl>
-            <dl>
+            {showExitIP && <dl>
               <dt>出口 IP</dt>
               <dd>{renderAddresses(active) || "—"}</dd>
-            </dl>
+            </dl>}
             <dl>
               <dt>运行时长</dt>
               <dd>{active.online ? uptime(active.metrics.uptime) : "—"}</dd>
@@ -674,22 +814,7 @@ export default function Nodes({ user, lookingGlass }: { user: User; lookingGlass
             )}
           </div>
         )}
-        {lookingGlass && active?.online && active.acceptPing && <div className="probe-history">
-          <h3>Looking Glass</h3>
-          <Space.Compact block>
-            <Input aria-label="Ping 目标" placeholder="域名或 IP" value={pingHost} onChange={(event) => setPingHost(event.target.value)} onPressEnter={() => !pingPending && void ping(active.id)} />
-            <Button disabled={!pingHost.trim()} loading={pingPending} onClick={() => void ping(active.id)}>Ping</Button>
-          </Space.Compact>
-          {pingResult?.id === active.id && <Alert className="alert-gap" type={pingResult.ok ? "success" : "warning"} message={pingResult.text} />}
-        </div>}
-        {user.admin&&active?.online&&<div className="probe-history">
-          <h3>转发链路诊断</h3>
-          <Space.Compact block>
-            <InputNumber aria-label="规则 ID" min={1} value={ruleID} onChange={setRuleID} placeholder="规则 ID"/>
-            <Button onClick={()=>void testTarget(active.id)} disabled={!ruleID} loading={probePending}>测试 TCP 链路</Button>
-          </Space.Compact>
-          {probeResult&&<Alert style={{marginTop:12}} type={probeResult.connected?"success":"warning"} message={probeResult.connected?(probeResult.backup?"备用链路已接通":"链路已接通")+" · "+probeResult.latencyMs+" ms":"目标连接失败"}/>}
-        </div>}
+        {user.admin && active?.online && <ConnectivityTest key={active.id} nodeID={active.id} />}
         {history.length > 1 && (
           <div className="probe-history">
             <h3>近一小时带宽</h3>
@@ -708,6 +833,21 @@ export default function Nodes({ user, lookingGlass }: { user: User; lookingGlass
           </div>
         )}
       </Drawer>
+      <Modal open={pingNodeID !== undefined} centered width={440}
+        title={"节点 Ping 测试" + (pingNode ? " · " + nodeDisplayName(pingNode) : "")}
+        onCancel={closePing} footer={null} destroyOnHidden>
+        {!lookingGlass ? <Alert showIcon type="info" message="节点 Ping 测试已关闭"
+          description={user.admin ? <a href="#/settings" onClick={closePing}>前往站点设置开启</a> : undefined} />
+          : !pingNode?.online ? <Alert showIcon type="warning" message="节点当前离线" />
+            : !pingNode.acceptPing ? <Alert showIcon type="info" message="当前节点版本尚不支持 Ping" />
+              : <Space.Compact block>
+                <Input aria-label="Ping 目标" placeholder="输入域名或 IPv4 / IPv6" value={pingHost} disabled={pingPending}
+                  onChange={event => setPingHost(event.target.value)} onPressEnter={() => void ping()} />
+                <Button type="primary" disabled={!pingHost.trim()} loading={pingPending} onClick={() => void ping()}>开始 Ping</Button>
+              </Space.Compact>}
+        {pingResult && pingResult.id === pingNodeID && <Alert style={{ marginTop: 12 }} showIcon
+          type={pingResult.ok ? "success" : "warning"} message={pingResult.text} />}
+      </Modal>
     </section>
   );
 }

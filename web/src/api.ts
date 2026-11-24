@@ -261,6 +261,7 @@ export type RegistrationVerification = "off" | "arithmetic" | "turnstile";
 
 export type Site = {
   lookingGlass?: string;
+  showAdminNodeIPs?: boolean;
   showShop?: string;
   showOrders?: string;
   showNodeStatus?: string;
@@ -271,6 +272,7 @@ export type Site = {
   announcement: string;
   homeLinks?: HomeLink[];
   registration: string;
+  registrationPasswordBytes?: { min: number; max: number };
   registrationChallenge?: string;
   registrationVerification?: RegistrationVerification;
   registrationTurnstileSiteKey?: string;

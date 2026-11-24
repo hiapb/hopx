@@ -22,13 +22,9 @@ var botToken = regexp.MustCompile(`^[0-9]+:[A-Za-z0-9_-]{20,80}$`)
 var botSecret = regexp.MustCompile(`^[a-zA-Z0-9_-]{20,128}$`)
 
 type offlineNotificationSettings struct {
-	Default        int64            `json:"default"`
-	Groups         map[string]int64 `json:"groups"`
-	Retention      int64            `json:"retention"`
-	GroupRetention map[string]int64 `json:"groupRetention"`
+	Default int64            `json:"default"`
+	Groups  map[string]int64 `json:"groups"`
 }
-
-const defaultNodeRetention = 86400
 
 func (config offlineNotificationSettings) offlineThreshold(groupID string, offlineSeconds int) int64 {
 	grace, custom := config.Groups[groupID]
@@ -38,19 +34,8 @@ func (config offlineNotificationSettings) offlineThreshold(groupID string, offli
 	return int64(offlineSeconds) + grace
 }
 
-func (config offlineNotificationSettings) retentionThreshold(groupID string, offlineSeconds int) int64 {
-	retention := config.GroupRetention[groupID]
-	if retention == 0 {
-		retention = config.Retention
-	}
-	if retention == 0 {
-		retention = defaultNodeRetention
-	}
-	return max(retention, config.offlineThreshold(groupID, offlineSeconds)+1)
-}
-
 func (s *Server) offlineNotificationConfig() offlineNotificationSettings {
-	config := offlineNotificationSettings{Groups: map[string]int64{}, GroupRetention: map[string]int64{}}
+	config := offlineNotificationSettings{Groups: map[string]int64{}}
 	_ = json.Unmarshal([]byte(s.setting("offlineNotifications", "{}")), &config)
 	return config
 }
@@ -72,34 +57,6 @@ func (s *Server) offlineNotifications(w http.ResponseWriter, r *http.Request, _ 
 		group, err := strconv.ParseInt(id, 10, 64)
 		if err != nil || group < 1 || seconds < 0 || seconds > 86400*30 {
 			fail(w, 400, "设备组或宽限期无效")
-			return
-		}
-	}
-	if config.Retention < 0 || config.Retention > 86400*90 || len(config.GroupRetention) > 10000 ||
-		(config.Retention != 0 && config.Retention <= config.Default) {
-		fail(w, 400, "默认离线保留期须大于宽限期，且最多 90 天")
-		return
-	}
-	for id, seconds := range config.GroupRetention {
-		group, err := strconv.ParseInt(id, 10, 64)
-		if err != nil || group < 1 || seconds < 1 || seconds > 86400*90 {
-			fail(w, 400, "设备组或离线保留期无效")
-			return
-		}
-	}
-	groups, err := s.groups()
-	if err != nil {
-		dbFailure(w, err)
-		return
-	}
-	for _, group := range groups {
-		id := strconv.FormatInt(group.ID, 10)
-		seconds := config.GroupRetention[id]
-		if seconds == 0 {
-			seconds = config.Retention
-		}
-		if seconds != 0 && seconds <= config.offlineThreshold(id, group.OfflineSeconds) {
-			fail(w, 400, group.Name+" 的保留期必须大于离线判定与通知宽限期之和")
 			return
 		}
 	}

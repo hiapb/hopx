@@ -14,6 +14,7 @@ import (
 	"log/slog"
 	"net"
 	"net/http"
+	"net/netip"
 	"net/url"
 	"os"
 	"os/exec"
@@ -124,6 +125,33 @@ func api(ctx context.Context, client *http.Client, panel, path, key string, id i
 	return json.NewDecoder(io.LimitReader(resp.Body, 64<<20)).Decode(output)
 }
 
+func nodeAddresses(settings Settings, previous wire.NodeAddresses) wire.NodeAddresses {
+	result := wire.NodeAddresses{IPv4: settings.IPv4, IPv6: settings.IPv6}
+	if result.IPv4 != "" && result.IPv6 != "" {
+		return result
+	}
+	addresses, _ := net.InterfaceAddrs()
+	for _, address := range addresses {
+		candidate, ok := address.(*net.IPNet)
+		if !ok {
+			continue
+		}
+		ip, _ := netip.AddrFromSlice(candidate.IP)
+		ip = ip.Unmap()
+		if !wire.PublicDestination(ip) {
+			continue
+		}
+		value := ip.String()
+		if ip.Is4() && settings.IPv4 == "" && (result.IPv4 == "" || value == previous.IPv4) {
+			result.IPv4 = value
+		}
+		if ip.Is6() && settings.IPv6 == "" && (result.IPv6 == "" || value == previous.IPv6) {
+			result.IPv6 = value
+		}
+	}
+	return result
+}
+
 func loadIdentity(settings Settings) (localState, error) {
 	var state localState
 	name := filepath.Join(settings.Directory, "identity.json")
@@ -135,25 +163,9 @@ func loadIdentity(settings Settings) (localState, error) {
 	if settings.Enrollment == "" {
 		return state, errors.New("registration token required")
 	}
-	state.Registration = wire.Registration{Name: settings.Name, Region: settings.Region, Address: settings.Address, IPv4: settings.IPv4, IPv6: settings.IPv6, RelayAddress: settings.RelayAddress, RelayTransport: settings.RelayTransport}
-	if state.Registration.IPv4 == "" || state.Registration.IPv6 == "" {
-		addresses, _ := net.InterfaceAddrs()
-		for _, address := range addresses {
-			var ip net.IP
-			if candidate, ok := address.(*net.IPNet); ok {
-				ip = candidate.IP
-			}
-			if ip == nil || !ip.IsGlobalUnicast() || ip.IsPrivate() {
-				continue
-			}
-			if ip.To4() != nil && state.Registration.IPv4 == "" {
-				state.Registration.IPv4 = ip.String()
-			}
-			if ip.To4() == nil && state.Registration.IPv6 == "" {
-				state.Registration.IPv6 = ip.String()
-			}
-		}
-	}
+	host, _, _ := net.SplitHostPort(settings.RelayAddress)
+	addresses := nodeAddresses(settings, wire.NodeAddresses{IPv4: host, IPv6: host})
+	state.Registration = wire.Registration{Name: settings.Name, Region: settings.Region, Address: settings.Address, IPv4: addresses.IPv4, IPv6: addresses.IPv6, RelayAddress: settings.RelayAddress, RelayTransport: settings.RelayTransport}
 	if settings.RelayAddress != "" {
 		var err error
 		state.Registration.RelayCert, state.RelayKey, err = certificate.SelfSigned(settings.RelayAddress)
@@ -378,6 +390,9 @@ func Run(ctx context.Context, settings Settings) (runErr error) {
 	key := hmac.New(sha256.New, []byte(state.RelayKey))
 	_, _ = key.Write([]byte("hopx DTLS relay key v1"))
 	nativeKey := hex.EncodeToString(key.Sum(nil))
+	addresses := wire.NodeAddresses{IPv4: state.Registration.IPv4, IPv6: state.Registration.IPv6}
+	var nextAddressCheck time.Time
+	addressReportPending := false
 	defer func() {
 		if stopBandwidth != nil {
 			stopBandwidth()
@@ -392,6 +407,11 @@ func Run(ctx context.Context, settings Settings) (runErr error) {
 			return nil
 		}
 		delay := settings.Period
+		if now := time.Now(); !now.Before(nextAddressCheck) {
+			addresses = nodeAddresses(settings, addresses)
+			nextAddressCheck = now.Add(30 * time.Second)
+			addressReportPending = true
+		}
 		engine.mux.SweepIdle()
 		report, reportErr := prepareReport(engine, spool)
 		if reportErr != nil {
@@ -406,6 +426,9 @@ func Run(ctx context.Context, settings Settings) (runErr error) {
 		metrics.TCPConnections, metrics.UDPSessions = engine.activeTCP.Load(), engine.activeUDP.Load()
 		metrics.UDPDrop = engine.udpDropped.Load()
 		heartbeat := wire.Heartbeat{Version: settings.Version, OS: runtime.GOOS, Arch: runtime.GOARCH, Revision: revision, Metrics: metrics, Report: report, AcceptTLSPolicy: true, AcceptRouteSets: true, AcceptSharedTLS: true, AcceptIngress: true, AcceptRuleProbe: true, AcceptRelayTransports: true, AcceptUDPProxy: true, AcceptWebsocketMux: true, AcceptAlternateRelayAddress: true, AcceptPing: true}
+		if addressReportPending {
+			heartbeat.Addresses = &addresses
+		}
 		if nativeListener != nil {
 			heartbeat.NativeUDPKey = nativeKey
 		}
@@ -456,10 +479,9 @@ func Run(ctx context.Context, settings Settings) (runErr error) {
 			}
 			delay = max(delay, 10*time.Second)
 		} else {
+			addressReportPending = false
 			if reply.LiveBandwidth && stopBandwidth == nil {
-				var bandwidthContext context.Context
-				bandwidthContext, stopBandwidth = context.WithCancel(ctx)
-				go reportBandwidth(bandwidthContext, client, settings.Panel, settings.Interface, state.Identity)
+				stopBandwidth = startBandwidthReporting(dataContext, client, settings.Panel, settings.Interface, state.Identity)
 			} else if !reply.LiveBandwidth && stopBandwidth != nil {
 				stopBandwidth()
 				stopBandwidth = nil

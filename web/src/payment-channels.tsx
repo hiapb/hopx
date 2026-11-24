@@ -1,5 +1,5 @@
 import { useState } from "react";
-import { Alert, App, Button, Form, Input, InputNumber, Select, Space, Switch, Table, Tag } from "antd";
+import { Alert, App, Button, Form, Grid, Input, InputNumber, Select, Space, Switch, Table, Tag } from "antd";
 import { api, useData } from "./api";
 import { useConfirmAction } from "./confirm-action";
 
@@ -29,6 +29,7 @@ type PaymentChannel = {
 };
 
 export default function PaymentChannels() {
+  const narrow = Grid.useBreakpoint().md === false;
   const channels = useData<PaymentChannel[]>("/admin/payment-channels", []);
   const { message } = App.useApp();
   const confirmAction = useConfirmAction();
@@ -94,7 +95,7 @@ export default function PaymentChannels() {
 
   return <>
     {channels.error && <Alert className="alert-gap" type="error" showIcon message={channels.error} />}
-    <Space wrap className="list-toolbar">
+    <Space wrap={!narrow} className="list-toolbar">
       <Button type="primary" disabled={working} onClick={() => { setJSON(undefined); setEditor({ kind: "epay", enabled: false, fee: 0 }); }}>添加支付通道</Button>
       <Button disabled={channels.busy || working || !!channels.error} onClick={() => {
         setEditor(undefined);
@@ -108,12 +109,13 @@ export default function PaymentChannels() {
       dataSource={channels.value}
       loading={channels.busy}
       pagination={false}
+      scroll={narrow && channels.value.length ? { x: 480 } : undefined}
       columns={[
         { title: "名称", dataIndex: "name" },
         { title: "类型", dataIndex: "kind", render: (kind: string) => paymentKinds[kind] || kind },
         { title: "费率", dataIndex: "fee", render: (fee: number) => (fee / 100) + "%" },
         { title: "状态", dataIndex: "enabled", render: (enabled: boolean) => <Tag color={enabled ? "success" : "default"}>{enabled ? "启用" : "停用"}</Tag> },
-        { title: "操作", key: "action", render: (_, row) => <Space wrap>
+        { title: "操作", key: "action", render: (_, row) => <Space wrap={!narrow}>
           <Button size="small" disabled={json !== undefined || working} onClick={() => setEditor({ ...row, fee: row.fee / 100 })}>编辑</Button>
           <Button size="small" disabled={json !== undefined || working} onClick={() => archive(row)}>归档</Button>
         </Space> },

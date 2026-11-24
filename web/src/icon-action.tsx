@@ -1,6 +1,7 @@
-import { Button, Tooltip } from "antd";
+import { Button } from "antd";
 import type { ButtonProps } from "antd";
 import type { Ref } from "react";
+import DismissibleTooltip from "./dismissible-tooltip";
 
 type IconActionProps = Omit<ButtonProps, "title" | "aria-label"> & {
   label: string;
@@ -10,8 +11,8 @@ type IconActionProps = Omit<ButtonProps, "title" | "aria-label"> & {
 export default function IconAction({ label, disabled, ...props }: IconActionProps) {
   const button = <Button type="text" size="small" {...props} disabled={disabled} aria-label={label} />;
   return (
-    <Tooltip title={label} trigger={["hover", "focus"]} color="#25332e" destroyOnHidden>
+    <DismissibleTooltip title={label} color="#25332e">
       {disabled ? <span className="disabled-icon-action">{button}</span> : button}
-    </Tooltip>
+    </DismissibleTooltip>
   );
 }

@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"io"
 	"net/http"
 	"net/http/cookiejar"
 	"net/http/httptest"
@@ -46,7 +47,7 @@ func TestNodeBandwidthStreamAndCheckpoint(t *testing.T) {
 	bandwidthURL := base + "/node/bandwidth"
 	testRequest(t, client, "POST", bandwidthURL, headers, sample, 401, nil)
 
-	ctx, cancel := context.WithTimeout(context.Background(), 4*time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 	request, err := http.NewRequestWithContext(ctx, "GET", base+"/nodes/events", nil)
 	if err != nil {
@@ -80,6 +81,7 @@ func TestNodeBandwidthStreamAndCheckpoint(t *testing.T) {
 	sample.InMbps, sample.OutMbps = 13.5, 5.2
 	sample.InBytes, sample.OutBytes = 900, 1800
 	testRequest(t, client, "POST", bandwidthURL, map[string]string{"Authorization": "Bearer wrong", "X-Node-ID": headers["X-Node-ID"]}, sample, 401, nil)
+	testRequest(t, client, "POST", bandwidthURL, map[string]string{"Authorization": "Bearer wrong", "X-Node-ID": headers["X-Node-ID"]}, []string{}, 401, nil)
 	testRequest(t, client, "POST", bandwidthURL, headers, sample, 204, nil)
 	testRequest(t, client, "POST", bandwidthURL, headers, sample, 429, nil)
 	if line := readLine(); line != "event: bandwidth" {
@@ -98,6 +100,13 @@ func TestNodeBandwidthStreamAndCheckpoint(t *testing.T) {
 		t.Fatalf("live update changed the database checkpoint: %d %d %v", inbound, outbound, err)
 	}
 
+	testRequest(t, client, "POST", base+"/logout", nil, nil, 204, nil)
+	if _, err := stream.ReadString('\n'); err != nil {
+		t.Fatal("bandwidth event not terminated:", err)
+	}
+	if _, err := stream.ReadString('\n'); err != io.EOF {
+		t.Fatalf("status stream should close after logout, got %v", err)
+	}
 	cancel()
 	deadline := time.Now().Add(time.Second)
 	for {
@@ -121,6 +130,7 @@ func TestNodeBandwidthStreamAndCheckpoint(t *testing.T) {
 	delete(panel.devices, node.ID)
 	panel.mu.Unlock()
 	panel.invalidateNodeStatus("POST /api/node/register")
+	testRequest(t, client, "POST", base+"/login", nil, map[string]string{"name": "admin", "password": "test-password-123"}, 200, nil)
 	var devices []wire.Device
 	testRequest(t, client, "GET", base+"/nodes", nil, nil, 200, &devices)
 	if len(devices) != 1 || devices[0].Online || devices[0].Metrics.Bandwidth != heartbeat.Metrics.Bandwidth {

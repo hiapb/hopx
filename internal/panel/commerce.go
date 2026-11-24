@@ -909,7 +909,7 @@ func parseHomeLinks(value string) ([]homeLink, error) {
 }
 
 func (s *Server) settings(w http.ResponseWriter, r *http.Request, u User) {
-	keys := map[string]string{"name": "HopX", "announcement": "", "registration": "closed", "hideIPs": "true", "personalTunnels": "false", "epayGateway": "", "epayPID": "", "epayKey": "", "referralRate": "0", "minRecharge": "100", "telegramUsername": "", "telegramToken": "", "telegramWebhookSecret": "", "registrationChallenge": "false"}
+	keys := map[string]string{"name": "HopX", "announcement": "", "registration": "closed", "personalTunnels": "false", "epayGateway": "", "epayPID": "", "epayKey": "", "referralRate": "0", "minRecharge": "100", "telegramUsername": "", "telegramToken": "", "telegramWebhookSecret": "", "registrationChallenge": "false"}
 	keys["referralFirstOnly"], keys["referralRequireBinding"] = "false", "false"
 	keys["hideAdminIPs"] = "false"
 	keys["lookingGlass"], keys["diagnoseIPVisibility"] = "false", "admin"

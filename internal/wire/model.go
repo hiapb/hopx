@@ -271,6 +271,7 @@ type Metrics struct {
 }
 
 type Heartbeat struct {
+	Addresses                   *NodeAddresses    `json:"addresses,omitempty"`
 	AcceptPublicTargets         bool              `json:"acceptPublicTargets,omitempty"`
 	AcceptScopedReverse         bool              `json:"acceptScopedReverse,omitempty"`
 	AcceptExitMeter             bool              `json:"acceptExitMeter,omitempty"`
@@ -309,6 +310,11 @@ type Heartbeat struct {
 	UpdateError                 string            `json:"updateError"`
 	Metrics                     Metrics           `json:"metrics"`
 	Report                      *Report           `json:"report,omitempty"`
+}
+
+type NodeAddresses struct {
+	IPv4 string `json:"ipv4,omitempty"`
+	IPv6 string `json:"ipv6,omitempty"`
 }
 
 type Registration struct {
@@ -377,14 +383,15 @@ type Device struct {
 	ID                   int64  `json:"id"`
 	GroupID              int64  `json:"groupId"`
 	Registration
-	Version     string    `json:"version"`
-	Revision    string    `json:"revision"`
-	ApplyError  string    `json:"applyError"`
-	UpdateError string    `json:"updateError"`
-	LastSeen    time.Time `json:"lastSeen"`
-	Online      bool      `json:"online"`
-	Revoked     bool      `json:"revoked,omitempty"`
-	Metrics     Metrics   `json:"metrics"`
+	Version      string    `json:"version"`
+	Revision     string    `json:"revision"`
+	ApplyError   string    `json:"applyError"`
+	UpdateError  string    `json:"updateError"`
+	LastSeen     time.Time `json:"lastSeen"`
+	Online       bool      `json:"online"`
+	Revoked      bool      `json:"revoked,omitempty"`
+	StatusHidden bool      `json:"-"`
+	Metrics      Metrics   `json:"metrics"`
 }
 
 type QuotaClaim struct {
