@@ -338,8 +338,8 @@ export default function Nodes({ user, lookingGlass }: { user: User; lookingGlass
   const summary = [
     { label: "在线节点", value: onlineNodes.length, total: visibleNodes.length, icon: Server },
     { label: "离线节点", value: visibleNodes.length - onlineNodes.length, icon: Activity },
-    { label: "上行", value: speed(bandwidth.outMbps), cumulative: bandwidth.hasTotals ? bytes(bandwidth.outBytes) : "—", icon: ArrowUp },
-    { label: "下行", value: speed(bandwidth.inMbps), cumulative: bandwidth.hasTotals ? bytes(bandwidth.inBytes) : "—", icon: ArrowDown },
+    { label: "实时上行", value: speed(bandwidth.outMbps), cumulative: bandwidth.hasTotals ? bytes(bandwidth.outBytes) : "—", icon: ArrowUp },
+    { label: "实时下行", value: speed(bandwidth.inMbps), cumulative: bandwidth.hasTotals ? bytes(bandwidth.inBytes) : "—", icon: ArrowDown },
   ];
 
   function showDetails(id: number) {
@@ -466,13 +466,19 @@ export default function Nodes({ user, lookingGlass }: { user: User; lookingGlass
           </div>}
           action={rollout.phase === "paused" && <Button size="small" loading={resumingRollout} onClick={() => void resumeRollout()}>跳过此节点</Button>} />}
       <dl className="probe-overview">
-        {summary.map(({ label, value, total, cumulative, icon: Icon }) => <div key={label}>
-          <dt><Icon size={13} aria-hidden="true" />{label}</dt>
-          <dd>{loading || (!received && nodeError) ? "—" : value}
-            {!loading && received && total !== undefined && <small> / {total}</small>}
-          </dd>
-          {cumulative !== undefined && !loading && received && <dd className="probe-overview-total">网卡累计 {cumulative}</dd>}
-        </div>)}
+        {summary.map(({ label, value, total, cumulative, icon: Icon }) => {
+          const [amount, unit] = String(loading || (!received && nodeError) ? "—" : value).split(" ");
+          return <div key={label}>
+            <dt><Icon size={14} aria-hidden="true" />{label}</dt>
+            <dd>
+              <span className="probe-overview-value">
+                {amount}{unit && <> <small>{unit}</small></>}
+                {!loading && received && total !== undefined && <small> / {total}</small>}
+              </span>
+              {cumulative !== undefined && !loading && received && <span className="probe-overview-total">网卡累计 {cumulative}</span>}
+            </dd>
+          </div>;
+        })}
       </dl>
       <div className="probe-filters">
         <Input

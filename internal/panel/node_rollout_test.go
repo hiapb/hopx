@@ -40,8 +40,8 @@ func TestRolloutPausesAfterRollbackAcrossPanelRestart(t *testing.T) {
 		t.Fatalf("rollback must pause the rollout: %+v", server.rollout)
 	}
 	updated := &wire.Release{Version: "fixed"}
-	if server.nodeRelease(second, updated, config, false) == nil {
-		t.Fatal("a corrected release should start a new rollout")
+	if server.nodeRelease(first, updated, config, false) == nil {
+		t.Fatal("the previously failed node should receive the corrected release")
 	}
 }
 

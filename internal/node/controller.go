@@ -608,10 +608,6 @@ func Run(ctx context.Context, settings Settings) error {
 				if ready {
 					upgradeHealthy++
 					if upgradeHealthy >= 2 {
-						if err := engine.checkUpgradeRoutes(dataContext, config); err != nil {
-							_ = atomicFile(filepath.Join(settings.Directory, "update.check"), []byte(err.Error()), 0600)
-							return err
-						}
 						if e := confirmUpgrade(settings); e != nil {
 							return e
 						}

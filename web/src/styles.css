@@ -448,31 +448,28 @@ button:focus-visible, a:focus-visible { outline: 2px solid var(--accent); outlin
   margin: 0 0 10px;
   border: 1px solid var(--line);
   border-radius: 8px;
-  background: var(--subtle);
+  background: var(--rail);
 }
 .probe-overview > div {
-  display: flex;
-  align-content: center;
-  align-items: baseline;
-  flex-wrap: wrap;
-  gap: 1px 6px;
   min-width: 0;
-  padding: 6px 10px;
-  line-height: 1.2;
+  padding: 8px 12px;
 }
 .probe-overview > div + div { border-inline-start: 1px solid var(--line); }
-.probe-overview dt { display: flex; align-items: center; gap: 4px; color: var(--muted); font-size: 12px; }
+.probe-overview dt { display: flex; align-items: center; gap: 6px; color: var(--muted); font-size: 12px; line-height: 16px; }
 .probe-overview dt svg { color: var(--accent); flex: none; }
 .probe-overview dd {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: 1px 10px;
   min-width: 0;
-  margin: 0;
-  font-size: 14px;
-  font-weight: 680;
+  margin: 2px 0 0;
   font-variant-numeric: tabular-nums;
   overflow-wrap: anywhere;
 }
-.probe-overview small { color: var(--muted); font-size: 11px; font-weight: 500; }
-.probe-overview dd.probe-overview-total { flex-basis: 100%; color: var(--muted); font-size: 11px; font-weight: 500; }
+.probe-overview-value { color: var(--text); font-size: 19px; font-weight: 650; line-height: 24px; }
+.probe-overview-value small { color: var(--muted); font-size: 12px; font-weight: 500; }
+.probe-overview-total { color: var(--muted); font-size: 12px; line-height: 16px; }
 .probe-filters { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; margin-bottom: 8px; }
 .probe-filters .ant-input-affix-wrapper { width: min(100%, 200px); }
 .probe-filters .ant-select { min-width: 94px; max-width: 220px; }
@@ -587,7 +584,8 @@ button:focus-visible, a:focus-visible { outline: 2px solid var(--accent); outlin
 }
 @media (max-width: 767px) {
   .content:has(> .probe-page) { padding-block-start: 9px; }
-  .probe-overview > div { padding: 4px 7px; }
+  .probe-overview > div { padding: 6px 10px; }
+  .probe-overview-value { font-size: 18px; }
   .probe-filters .ant-input-affix-wrapper { flex: 1 1 108px; width: auto; }
   .probe-filters .ant-select { flex: 1 1 94px; max-width: none; }
   .node-head { gap: 0 10px; }

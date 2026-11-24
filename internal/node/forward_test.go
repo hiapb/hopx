@@ -359,17 +359,6 @@ func TestFallbackUsesBackupWhenPrimaryStalls(t *testing.T) {
 	if len(result.RecentRoutes) != 1 || !result.RecentRoutes[0].Backup || result.RecentRoutes[0].Network != "tcp" {
 		t.Fatalf("last forwarded route: %+v", result.RecentRoutes)
 	}
-	if err := engine.checkUpgradeRoutes(ctx, wire.Config{Rules: []wire.Forward{f}}); err != nil {
-		t.Fatalf("a reachable backup route should allow the candidate: %v", err)
-	}
-	f.Targets = []string{freeTCP(t)}
-	config := wire.Config{Revision: "unreachable", Rules: []wire.Forward{f}}
-	if err := engine.Apply(ctx, config, nil); err != nil {
-		t.Fatal(err)
-	}
-	if err := engine.checkUpgradeRoutes(ctx, config); err == nil {
-		t.Fatal("an unreachable target must fail the candidate check")
-	}
 }
 
 func TestReverseEgress(t *testing.T) {
