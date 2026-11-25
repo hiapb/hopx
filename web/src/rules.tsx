@@ -798,17 +798,17 @@ export default function Rules({ user, initialQuery, refreshUser, siteProbeInterv
               render: (_, r) => {
                 const addresses = connectionAddresses(r);
                 return <div className="rule-cell rule-entry-cell">
-                  <span className="data-title">{r.entry ? names.get(r.entry) || r.entry : "未选择"}</span>
-                  {addresses.length > 0 && <>
+                  <div className="rule-entry-meta">
+                    <span className="data-title">{r.entry ? names.get(r.entry) || r.entry : "未选择"}</span>
+                    {addresses.length > 0 && <span className="protocol-label">{protocolLabel(r)}</span>}
+                  </div>
+                  {addresses.length > 0 && <div className="rule-entry-connection">
                     <button type="button" className="button-link rule-entry-address mono"
                       aria-label={"查看入口连接地址 " + addresses[0]} onClick={() => setAddressRule(r)}>{addresses[0]}</button>
-                    <div className="rule-entry-meta">
-                      <span className="protocol-label">{protocolLabel(r)}</span>
-                      {addresses.length > 1 && <button type="button" className="button-link rule-cell-link" onClick={() => setAddressRule(r)}>
-                        {addresses.length} 个地址
-                      </button>}
-                    </div>
-                  </>}
+                    {addresses.length > 1 && <button type="button" className="button-link rule-cell-link" onClick={() => setAddressRule(r)}>
+                      {addresses.length} 个地址
+                    </button>}
+                  </div>}
                 </div>;
               },
             },

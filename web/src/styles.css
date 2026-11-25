@@ -789,7 +789,12 @@ button:focus-visible, a:focus-visible { outline: 2px solid var(--accent); outlin
 .button-link:hover { color: var(--accent); text-decoration: underline; }
 .rule-entry-meta { display: flex; flex-wrap: wrap; align-items: center; gap: 4px 8px; }
 .rules-table .rule-entry-cell { display: grid; gap: 2px; min-width: 0; }
+.rule-entry-connection { display: flex; flex-wrap: wrap; align-items: center; gap: 2px 8px; }
+.rule-entry-meta > .data-title { max-width: 100%; }
+.rule-entry-connection > .rule-cell-link { white-space: nowrap; }
 .rules-table .button-link.rule-entry-address {
+  min-width: 0;
+  max-width: 100%;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
