@@ -38,9 +38,13 @@ type TrafficDirection = (typeof trafficDirections)[number];
 
 function ResourceMeter({ node, metric }: { node: Node; metric: (typeof resources)[number][0] }) {
   const percent = Math.max(0, Math.min(100, Math.round(node.metrics[metric] || 0)));
-  return <span className="probe-meter">
+  const level = !node.online ? "offline" :
+    percent >= 90 ? "critical" :
+    percent >= 80 ? "high" :
+    percent >= 60 ? "elevated" : "normal";
+  return <span className="probe-meter" data-level={level}>
     <span aria-hidden="true" className="probe-track">
-      <i className={percent >= 80 && node.online ? "warn" : undefined} style={{ width: (node.online ? percent : 0) + "%" }} />
+      {node.online && <i style={{ width: percent + "%" }} />}
     </span>
     <span>{node.online ? percent + "%" : "—"}</span>
   </span>;

@@ -527,8 +527,12 @@ button:focus-visible, a:focus-visible { outline: 2px solid var(--accent); outlin
 .probe-resources dd { margin: 0; }
 .probe-meter { position: relative; isolation: isolate; display: block; padding: 3px 6px; color: var(--text); font-size: 14px; font-weight: 650; font-variant-numeric: tabular-nums; white-space: nowrap; }
 .probe-track { position: absolute; z-index: -1; inset: 0; overflow: hidden; border-radius: 4px; background: var(--subtle); }
-.probe-track i { display: block; height: 100%; border-radius: inherit; background: color-mix(in srgb, var(--online) 30%, transparent); }
-.probe-track i.warn { background: var(--warning); }
+.probe-track i { display: block; height: 100%; border-radius: inherit; background: var(--probe-fill, color-mix(in srgb, var(--online) 30%, transparent)); }
+.probe-meter[data-level="elevated"] { --probe-fill: color-mix(in srgb, var(--warning) 36%, transparent); }
+.probe-meter[data-level="high"] { --probe-fill: rgb(232 110 32 / 38%); }
+.probe-meter[data-level="critical"] { --probe-fill: color-mix(in srgb, var(--error) 42%, transparent); }
+.probe-meter[data-level="offline"] { color: var(--muted); }
+.probe-meter[data-level="offline"] .probe-track { background: color-mix(in srgb, var(--muted) 11%, var(--canvas)); }
 .probe-actions { display: flex; justify-content: flex-end; gap: 3px; }
 .probe-actions .ant-btn:not(.ant-btn-dangerous) { color: var(--muted); }
 .node-table .probe-actions .ant-btn { width: 30px; height: 30px; }
