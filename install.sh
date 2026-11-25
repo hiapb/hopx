@@ -440,7 +440,6 @@ upgrade_service() (
     if [[ -s $workdir/releases/$node_version/node-amd64 && -s $workdir/releases/$node_version/node-arm64 ]]; then
       # Build with the published version so the embedded version string
       # cannot turn a panel-only change into a node rollout.
-      say '正在检查节点程序是否有变化…'
       build_node_artifacts "$source" "$node_version" "$source_tmp/node-check"
       publish_nodes=false
       for arch in amd64 arm64; do
@@ -478,7 +477,7 @@ upgrade_service() (
       install -m 0644 -- "$source/scripts/$script" "$workdir/releases/.$script.next"
       mv -- "$workdir/releases/.$script.next" "$workdir/releases/$script"
     done
-    say '面板升级成功。节点程序未变化，继续使用当前版本。'
+    say '面板升级成功。'
   fi
   access
 )

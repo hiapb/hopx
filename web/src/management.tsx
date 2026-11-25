@@ -65,6 +65,7 @@ import IconAction from "./icon-action";
 import DismissibleTooltip from "./dismissible-tooltip";
 import { NodeFlag, nodeDisplayName } from "./node-location";
 import MultiSelect from "./multi-select";
+import TrafficRatio from "./traffic-ratio";
 
 type Row = Record<string, any>;
 type Field = {
@@ -1530,7 +1531,7 @@ export default function Management({ page, user, refresh }: Props) {
             {
               title: "流量倍率",
               dataIndex: "ratio",
-              render: (v: number) => v / 1000 + "×",
+              render: (ratio: number) => <TrafficRatio ratio={ratio} />,
             },
             {
               title: "授权用户组",
