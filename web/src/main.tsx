@@ -526,6 +526,7 @@ function Root() {
       locale={zhCN}
       button={{ autoInsertSpace: false }}
       modal={{ centered: true }}
+      tooltip={{ classNames: { root: "hopx-tooltip" } }}
       form={{ scrollToFirstError: { focus: true, block: "center" } }}
       theme={{
         algorithm: dark ? theme.darkAlgorithm : theme.defaultAlgorithm,

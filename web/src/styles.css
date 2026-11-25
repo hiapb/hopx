@@ -14,6 +14,7 @@
   --rail: rgba(248, 250, 246, 0.98);
   --subtle: rgba(242, 247, 239, 0.98);
   --dialog-surface: #fdfefa;
+  --tooltip-bg: #edf4ed;
   --dialog-soft: #f3f6ef;
   --dialog-line: #dce5db;
   --dialog-mask: #192c246b;
@@ -45,6 +46,7 @@
   --rail: #101419;
   --subtle: #1c222a;
   --dialog-surface: #1b222b;
+  --tooltip-bg: #35424d;
   --dialog-soft: #212a35;
   --dialog-line: #343f4d;
   --dialog-mask: #080c13ad;
@@ -527,7 +529,9 @@ button:focus-visible, a:focus-visible { outline: 2px solid var(--accent); outlin
 .probe-resources dd { margin: 0; }
 .probe-meter { position: relative; isolation: isolate; display: block; padding: 3px 6px; color: var(--text); font-size: 14px; font-weight: 650; font-variant-numeric: tabular-nums; white-space: nowrap; }
 button.probe-meter { width: 100%; border: 0; border-radius: 4px; background: none; text-align: start; cursor: pointer; }
-.probe-resource-tooltip { display: grid; gap: 2px; overflow-wrap: anywhere; }
+.probe-resource-details { display: grid; gap: 2px; overflow-wrap: anywhere; }
+.probe-resource-details strong { font-weight: 600; }
+.probe-resource-capacity { white-space: nowrap; font-variant-numeric: tabular-nums; }
 .probe-track { position: absolute; z-index: -1; inset: 0; overflow: hidden; border-radius: 4px; background: var(--subtle); }
 .probe-track i { display: block; height: 100%; border-radius: inherit; background: var(--probe-fill, color-mix(in srgb, var(--online) 30%, transparent)); }
 .probe-meter[data-level="elevated"] { --probe-fill: color-mix(in srgb, var(--warning) 36%, transparent); }
@@ -793,6 +797,19 @@ button.probe-meter { width: 100%; border: 0; border-radius: 4px; background: non
 .button-link.rule-name { font-weight: 660; color: var(--accent); }
 .rules-table .rule-name { max-width: 100%; overflow-wrap: anywhere; }
 .button-link:hover { color: var(--accent); text-decoration: underline; }
+.hopx-tooltip.ant-tooltip {
+  --antd-arrow-background-color: var(--tooltip-bg);
+  max-width: min(320px, calc(100vw - 24px));
+}
+.hopx-tooltip.ant-tooltip .ant-tooltip-inner {
+  min-height: 0;
+  padding: 5px 9px;
+  background: var(--tooltip-bg);
+  color: var(--text);
+  font-size: 12px;
+  line-height: 1.5;
+  box-shadow: 0 2px 8px rgb(0 0 0 / 14%);
+}
 .rule-entry-meta { display: flex; flex-wrap: wrap; align-items: center; gap: 4px 8px; }
 .rules-table .rule-entry-cell { display: grid; gap: 2px; min-width: 0; }
 .rule-entry-connection { display: flex; flex-wrap: wrap; align-items: center; gap: 2px 8px; }

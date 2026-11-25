@@ -1,6 +1,7 @@
 /// <reference types="vite/client" />
 
 import type { Node } from "./api";
+import DismissibleTooltip from "./dismissible-tooltip";
 
 const flags = import.meta.glob("/node_modules/flag-icons/flags/4x3/*.svg", {
   eager: true,
@@ -24,5 +25,7 @@ export function nodeDisplayName(node: Pick<Node, "name" | "countryCode"> & Parti
 export function NodeFlag({ node }: { node: Pick<Node, "countryCode"> }) {
   const country = nodeRegion(node);
   const flag = node.countryCode && flags[`/node_modules/flag-icons/flags/4x3/${node.countryCode.toLowerCase()}.svg`];
-  return flag ? <img className="node-country-flag" src={flag} alt={country} title={country} loading="lazy" decoding="async" /> : null;
+  return flag ? <DismissibleTooltip title={country}>
+    <img className="node-country-flag" src={flag} alt={country} loading="lazy" decoding="async" />
+  </DismissibleTooltip> : null;
 }

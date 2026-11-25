@@ -25,12 +25,12 @@ export function useTooltipKeyboardNavigation() {
 
 type TriggerEvents = Pick<HTMLAttributes<HTMLElement>,
   "onClickCapture" | "onFocus" | "onBlur" | "onPointerMove">;
-type Props = Pick<TooltipProps, "title" | "color"> & {
+type Props = Pick<TooltipProps, "title"> & {
   children: ReactElement<TriggerEvents>;
   clickToOpen?: boolean;
 };
 
-export default function DismissibleTooltip({ children, title, color, clickToOpen = false }: Props) {
+export default function DismissibleTooltip({ children, title, clickToOpen = false }: Props) {
   const [open, setOpen] = useState(false);
   const dismissed = useRef(false);
 
@@ -76,7 +76,7 @@ export default function DismissibleTooltip({ children, title, color, clickToOpen
     },
   });
 
-  return <Tooltip title={title} color={color} trigger={clickToOpen ? "click" : "hover"}
+  return <Tooltip title={title} trigger={clickToOpen ? "click" : "hover"}
     open={open} onOpenChange={next => {
       if (!next || clickToOpen || !dismissed.current) setOpen(next);
     }} destroyOnHidden styles={{ root: { pointerEvents: "none" } }}>

@@ -62,6 +62,7 @@ import { relayModes, relayModeHelp, relayModeLabel } from "./relay-protocols";
 import RefreshButton from "./refresh-button";
 import { useConfirmAction } from "./confirm-action";
 import IconAction from "./icon-action";
+import DismissibleTooltip from "./dismissible-tooltip";
 import { NodeFlag, nodeDisplayName } from "./node-location";
 import MultiSelect from "./multi-select";
 
@@ -833,7 +834,7 @@ export default function Management({ page, user, refresh }: Props) {
   }
 
   function sortHandle(row: { id: number; name: string; showOrder?: number }, index: number, siblings: readonly { id: number }[]) {
-    return <button className="sort-handle" type="button" title="拖动排序，或用方向键移动"
+    return <DismissibleTooltip title="拖动排序，或用方向键移动"><button className="sort-handle" type="button"
       aria-label={"调整 " + row.name + " 的顺序"} draggable
       onDragStart={event => { event.dataTransfer.setData("text/plain", String(row.id)); setDraggedID(row.id); }}
       onDragEnd={() => setDraggedID(undefined)}
@@ -843,7 +844,7 @@ export default function Management({ page, user, refresh }: Props) {
         const current = siblings.findIndex(item => item.id === row.id);
         const adjacent = siblings[current + (event.key === "ArrowUp" ? -1 : 1)];
         if (adjacent) reorder(row.id, adjacent.id);
-      }}><GripVertical size={15} aria-hidden="true" /><span>{row.showOrder || index + 1}</span></button>;
+      }}><GripVertical size={15} aria-hidden="true" /><span>{row.showOrder || index + 1}</span></button></DismissibleTooltip>;
   }
 
   function table(columns: any[], toolbar?: React.ReactNode) {
@@ -2010,14 +2011,14 @@ export default function Management({ page, user, refresh }: Props) {
           pagination={false}
           dataSource={nodes}
           columns={[
-            { title: "节点", key: "name", render: (_, node) => <span className="node-name" title={node.name}>
-              <NodeFlag node={node} /><span>{nodeDisplayName(node)}</span>
+            { title: "节点", key: "name", render: (_, node) => <span className="node-name">
+              <NodeFlag node={node} /><DismissibleTooltip title={node.name}><span>{nodeDisplayName(node)}</span></DismissibleTooltip>
             </span> },
             { title: "传输", dataIndex: "relayTransport", render: (value: string, node) => <Space size={4} wrap>
               {value ? relayModeLabel(value) : "—"}
               {node.nativeUDP && <Tag color="success">原生 UDP</Tag>}
-              {node.nativeUDPError && <Tag color="error" title={node.nativeUDPError}>UDP 监听失败</Tag>}
-              {node.relayModeError && <Tag color="error" title={node.relayModeError}>协议切换失败</Tag>}
+              {node.nativeUDPError && <DismissibleTooltip title={node.nativeUDPError}><Tag color="error">UDP 监听失败</Tag></DismissibleTooltip>}
+              {node.relayModeError && <DismissibleTooltip title={node.relayModeError}><Tag color="error">协议切换失败</Tag></DismissibleTooltip>}
             </Space> },
             { title: "版本", dataIndex: "version" },
             { title: "状态", render: (_, node) => <Tag color={node.revoked ? "warning" : node.online ? "green" : "default"}>{node.revoked ? "待重新接入" : node.online ? "在线" : "离线"}</Tag> },

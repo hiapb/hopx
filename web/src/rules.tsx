@@ -44,6 +44,7 @@ import type { DataReload, Group, Rule, User } from "./api";
 import RefreshButton from "./refresh-button";
 import { useConfirmAction } from "./confirm-action";
 import IconAction from "./icon-action";
+import DismissibleTooltip from "./dismissible-tooltip";
 import MultiSelect from "./multi-select";
 import { relayModeLabel } from "./relay-protocols";
 import JsonEditor from "./json-editor";
@@ -86,7 +87,8 @@ function RuleStatus({ rule }: { rule: Rule }) {
   const status = runtimeLabels[rule.runtime || (rule.enabled ? "syncing" : "paused")];
   const title = rule.routeRepair ? "设备组权限已变更，请重新选择线路" :
     rule.serviceBlock || (rule.reportedAt ? "最近心跳 " + date(rule.reportedAt) : undefined);
-  return <Tag className="rule-status" color={status?.color} title={title}>{status?.label || "等待同步"}</Tag>;
+  const badge = <Tag className="rule-status" color={status?.color}>{status?.label || "等待同步"}</Tag>;
+  return title ? <DismissibleTooltip title={title}>{badge}</DismissibleTooltip> : badge;
 }
 
 export default function Rules({ user, initialQuery, refreshUser, siteProbeInterval, showShop }: {
@@ -1171,7 +1173,9 @@ export default function Rules({ user, initialQuery, refreshUser, siteProbeInterv
                   <span>{chosenEntry.name}</span>
                   {selectedHops.map((hop, index) => (
                     <span key={index}><ChevronRight size={13} aria-hidden="true" />{hop?.name ?? "设备组"}
-                      {hop && hop.kind !== "chain" && <small title="设备组默认传输协议">{relayModeLabel(hop.relayMode)}</small>}
+                      {hop && hop.kind !== "chain" && <DismissibleTooltip title="设备组默认传输协议">
+                        <small>{relayModeLabel(hop.relayMode)}</small>
+                      </DismissibleTooltip>}
                     </span>
                   ))}
                   <span><ChevronRight size={13} aria-hidden="true" />目标地址</span>

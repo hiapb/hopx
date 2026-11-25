@@ -11,7 +11,7 @@ type IconActionProps = Omit<ButtonProps, "title" | "aria-label"> & {
 export default function IconAction({ label, disabled, ...props }: IconActionProps) {
   const button = <Button type="text" size="small" {...props} disabled={disabled} aria-label={label} />;
   return (
-    <DismissibleTooltip title={label} color="#25332e">
+    <DismissibleTooltip title={label}>
       {disabled ? <span className="disabled-icon-action">{button}</span> : button}
     </DismissibleTooltip>
   );

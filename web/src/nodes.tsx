@@ -55,14 +55,17 @@ function ResourceMeter({ node, metric, label, narrow }: {
 
   const cpu = metric === "cpu" ? metrics.cpuDetails : undefined;
   const capacity = metric === "ram" ? metrics.memoryBytes : metric === "disk" ? metrics.diskBytes : undefined;
-  return <DismissibleTooltip clickToOpen={narrow} title={<div className="probe-resource-tooltip">
-    <strong>{label} · {percent}%</strong>
-    {cpu?.model && <div>{cpu.model}</div>}
-    {!!cpu?.logicalCPUs && <div>逻辑核心 {cpu.logicalCPUs}</div>}
-    {cpu?.loadAverage && <div>平均负载 {cpu.loadAverage}</div>}
-    {!!cpu?.processes && <div>进程数 {cpu.processes}</div>}
-    {!!capacity?.total && <div>已用 / 总量 {bytes(capacity.used)} / {bytes(capacity.total)}</div>}
-  </div>}>
+  const tooltip = metric === "cpu" ? (
+    cpu ? <div className="probe-resource-details">
+      {cpu.model && <strong>{cpu.model}</strong>}
+      {!!cpu.logicalCPUs && <div>逻辑核心 {cpu.logicalCPUs}</div>}
+      {cpu.loadAverage && <div>平均负载 {cpu.loadAverage}</div>}
+      {!!cpu.processes && <div>进程数 {cpu.processes}</div>}
+    </div> : "暂无 CPU 详情"
+  ) : <span className="probe-resource-capacity">{label} {capacity?.total
+    ? bytes(capacity.used).replace(" ", "") + " / " + bytes(capacity.total).replace(" ", "")
+    : percent + "%"}</span>;
+  return <DismissibleTooltip clickToOpen={narrow} title={tooltip}>
     <button type="button" className="probe-meter" data-level={level} aria-label={`${label}占用 ${percent}%`}>
       <span aria-hidden="true" className="probe-track">
         <i style={{ width: percent + "%" }} />
@@ -556,8 +559,8 @@ export default function Nodes({ user, lookingGlass, showExitIP }: { user: User; 
       render: (_, node) => {
         const name = nodeDisplayName(node);
         return <div className="probe-node">
-          <button type="button" className="button-link data-title node-name" title={name} onClick={() => showDetails(node.id)}>
-            <NodeFlag node={node} /><span>{name}</span>
+          <button type="button" className="button-link data-title node-name" onClick={() => showDetails(node.id)}>
+            <NodeFlag node={node} /><DismissibleTooltip title={name}><span>{name}</span></DismissibleTooltip>
           </button>
           {narrow && <NodeStatus online={node.online} />}
         </div>;
@@ -861,10 +864,12 @@ export default function Nodes({ user, lookingGlass, showExitIP }: { user: User; 
             <h3>近一小时带宽</h3>
             <div className="probe-history-bars" aria-label="近一小时上下行带宽">
               {history.map(point => (
-                <span key={point.timestamp} title={date(point.timestamp) + " · 下行 " + speed(point.in) + " / 上行 " + speed(point.out)}>
-                  <i style={{ height: (historyPeak ? point.in / historyPeak : 0) * 100 + "%" }} />
-                  <b style={{ height: (historyPeak ? point.out / historyPeak : 0) * 100 + "%" }} />
-                </span>
+                <DismissibleTooltip key={point.timestamp} title={date(point.timestamp) + " · 下行 " + speed(point.in) + " / 上行 " + speed(point.out)}>
+                  <span>
+                    <i style={{ height: (historyPeak ? point.in / historyPeak : 0) * 100 + "%" }} />
+                    <b style={{ height: (historyPeak ? point.out / historyPeak : 0) * 100 + "%" }} />
+                  </span>
+                </DismissibleTooltip>
               ))}
             </div>
             <div className="probe-history-legend">
