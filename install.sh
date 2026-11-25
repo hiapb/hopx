@@ -378,13 +378,18 @@ restore_archive() (
   fi
   read -r -p '恢复将替换当前部署的数据并保留恢复前备份。是否继续？(y/N): ' response
   [[ $response =~ ^[Yy]$ ]] || return 0
-  local existing_artifacts="$workdir/releases/$version"
+  local node_version=$version
+  if [[ -s $workdir/releases/install-amd64.txt ]]; then
+    IFS= read -r node_version < "$workdir/releases/install-amd64.txt"
+    [[ $node_version =~ ^[A-Za-z0-9._-]{1,64}$ ]] || die '当前节点发布版本格式无效'
+  fi
+  local existing_artifacts="$workdir/releases/$node_version"
   (
     workdir="$tmp/release"
     mkdir -p "$workdir/keys"
     cp -- "$tmp/release.pem" "$workdir/keys/release.pem"
-    make_release "$image" "$version" "$workdir/releases/manifest.json" "" "$existing_artifacts"
-    publish_bootstrap "$version"
+    make_release "$image" "$node_version" "$workdir/releases/manifest.json" "" "$existing_artifacts"
+    publish_bootstrap "$node_version"
   )
   backup_archive
   local saved="$workdir/backups/pre-restore-$(date -u +%Y%m%dT%H%M%SZ)-$$"
@@ -415,6 +420,13 @@ restore_archive() (
 )
 
 upgrade_service() (
+  local with_nodes=false
+  case "${1:-}" in
+    '') ;;
+    --with-nodes) with_nodes=true ;;
+    *) die '用法：upgrade [--with-nodes]' ;;
+  esac
+  (( $# <= 1 )) || die '用法：upgrade [--with-nodes]'
   instance
   local source source_checkout source_tmp version image previous staged
   version=$(get_version)
@@ -426,8 +438,10 @@ upgrade_service() (
   load_source "$source_tmp"
   backup_archive
   build_panel "$image" "$version" "$source"
-  staged="$workdir/releases/.manifest.next"
-  make_release "$image" "$version" "$staged" "$source"
+  if $with_nodes; then
+    staged="$workdir/releases/.manifest.next"
+    make_release "$image" "$version" "$staged" "$source"
+  fi
   cp -- "$workdir/.env" "$workdir/.env.previous"
   awk -v image="$image" '/^HOPX_IMAGE=/{print "HOPX_IMAGE=" image;next}!/^HOPX_PASSWORD=/' "$workdir/.env.previous" > "$workdir/.env"
   if ! HOPX_PASSWORD= compose up -d --wait --wait-timeout 100; then
@@ -436,10 +450,14 @@ upgrade_service() (
     die '新版未通过就绪检查，已恢复上一版本镜像'
   fi
   rm -f -- "$workdir/.env.previous"
-  mv -- "$staged" "$workdir/releases/manifest.json"
-  publish_bootstrap "$version"
   save_management_script
-  say '面板升级成功，节点将自动按批更新。'
+  if $with_nodes; then
+    mv -- "$staged" "$workdir/releases/manifest.json"
+    publish_bootstrap "$version"
+    say '面板升级成功，新节点版本将自动按批发布。'
+  else
+    say '面板升级成功，继续使用当前节点版本。'
+  fi
   access
 )
 
@@ -645,7 +663,16 @@ MENU
   read -r -p '请选择操作 [0-11]: ' choice || exit
   case "$choice" in
     1) (set -e; install_service) ;;
-    2) (set -e; upgrade_service) ;;
+    2)
+      say '1) 仅升级面板（默认）'
+      say '2) 升级面板并发布新节点版本'
+      read -r -p '请选择升级方式 [1/2]: ' choice || return
+      case "$choice" in
+        ''|1) (set -e; upgrade_service) ;;
+        2) (set -e; upgrade_service --with-nodes) ;;
+        *) say '无效选项。' ;;
+      esac
+      ;;
     3) (set -e; instance; compose stop) ;;
     4) (set -e; instance; compose up -d --wait --wait-timeout 100) ;;
     5) (set -e; backup_archive) ;;
@@ -662,7 +689,7 @@ MENU
 
 case "${1:-}" in
   install) install_service ;;
-  upgrade) upgrade_service ;;
+  upgrade) shift; upgrade_service "$@" ;;
   stop) instance; compose stop ;;
   restart) instance; compose up -d --wait --wait-timeout 100 ;;
   backup|run-backup) backup_archive ;;
@@ -673,5 +700,5 @@ case "${1:-}" in
   s3) remote_tool s3 ;;
   migrate) migrate_nyanpass ;;
   '') set +e; while true; do main_menu; read -r -p '按回车返回主菜单...' || exit 0; done ;;
-  *) die '可用命令: install | upgrade | stop | restart | backup | restore | cron | uninstall | run-backup | ftp | s3 | migrate' ;;
+  *) die '可用命令: install | upgrade [--with-nodes] | stop | restart | backup | restore | cron | uninstall | run-backup | ftp | s3 | migrate' ;;
 esac

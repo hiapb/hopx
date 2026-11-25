@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useRef, useState } from "react";
-import type { Key } from "react";
+import type { Key, ReactNode } from "react";
 import {
   Alert,
   App,
@@ -49,6 +49,7 @@ import MultiSelect from "./multi-select";
 import { relayModeLabel } from "./relay-protocols";
 import JsonEditor from "./json-editor";
 import RuleDiagnostics from "./rule-diagnostics";
+import TrafficRatio from "./traffic-ratio";
 import { batchConfigs, clipboardConfigs, clipboardNeedsGroups, legacyRule, nyanpassExport, portChanges, ruleExport } from "./rule-transfer";
 
 const defaults: Partial<Rule> = {
@@ -194,25 +195,34 @@ export default function Rules({ user, initialQuery, refreshUser, siteProbeInterv
   const foldersPath = "/rules/folders" + (owner ? "?owner=" + owner : "");
   const folders = useData<{ name: string; count: number }[]>(foldersPath, []);
   const groups = useData<Group[]>("/groups?online=1" + (owner ? "&owner=" + owner : ""), []);
-  const names = useMemo(
-    () => new Map(groups.value.map((g) => [g.id, g.name])),
+  const groupsByID = useMemo(
+    () => new Map(groups.value.map(group => [group.id, group])),
     [groups.value],
   );
+  const groupLabel = (id: number, showRatio = true) => {
+    const group = groupsByID.get(id);
+    return <span className="rule-group-label">
+      <span>{group?.name || (id ? "#" + id : "未选择")}</span>
+      {showRatio && <TrafficRatio ratio={group?.ratio} />}
+    </span>;
+  };
   const toOption = (group: Group) => ({
     value: group.id,
     label: group.name,
+    displayLabel: groupLabel(group.id),
     description: [
       group.kind === "chain" ? "链式出口" : group.owner ? "自有出口" : "",
       ["relay", "exit", "both"].includes(group.kind) ? "GOST · " + relayModeLabel(group.relayMode) : "",
       group.onlineDevices === 0 ? "无在线节点" : "",
     ].filter(Boolean).join(" · "),
   });
-  const renderGroupOption = ({ data }: { data: ReturnType<typeof toOption> }) => (
+  const renderGroupOption = ({ data }: { data: { label: string; displayLabel?: ReactNode; description?: string } }) => (
     <div className="route-option">
-      <span>{data.label}</span>
+      {data.displayLabel ?? <span>{data.label}</span>}
       {data.description && <small>{data.description}</small>}
     </div>
   );
+  const groupSelect = { optionFilterProp: "label", optionLabelProp: "displayLabel", optionRender: renderGroupOption };
   const entries = groups.value
     .filter((g) => g.kind === "entry" || g.kind === "both")
     .map(toOption);
@@ -222,6 +232,7 @@ export default function Rules({ user, initialQuery, refreshUser, siteProbeInterv
   const chosenEntry = groups.value.find(group => group.id === ruleEntry);
   const chosenBulkEntry = groups.value.find(group => group.id === bulkEntry);
   const chosenImportEntry = groups.value.find(group => group.id === importEntry);
+  const configuredExit = groupsByID.get(rulePath?.at(-1) ?? 0);
   const ingress = chosenEntry?.ingress;
   const restrictions = [
     { key: "allow", label: "允许域名", value: ingress?.allowedHosts },
@@ -254,8 +265,15 @@ export default function Rules({ user, initialQuery, refreshUser, siteProbeInterv
       return true;
     });
   }
-  const describePath = (path: number[] | null, missing = false) =>
-    missing ? "未选择" : path?.map((id) => names.get(id) || "#" + id).join(" → ") || "直出";
+  const describePath = (path: number[] | null) =>
+    path?.map(id => groupsByID.get(id)?.name || "#" + id).join(" → ") || "直出";
+  const pathWithRatio = (path: number[] | null, missing = false) =>
+    missing ? "未选择" : !path?.length ? "直出" : <span className="rule-group-path">
+      {path.map((id, index) => <span key={id} className="rule-group-label">
+        {index > 0 && <ChevronRight size={13} aria-hidden="true" />}
+        {groupLabel(id, index === path.length - 1)}
+      </span>)}
+    </span>;
   const connectionAddresses = (rule: Rule) => {
     if (!rule.entry) return [];
     const raw = groups.value.find(group => group.id === rule.entry)?.connectHost || "";
@@ -701,9 +719,9 @@ export default function Rules({ user, initialQuery, refreshUser, siteProbeInterv
         }}>
           <div className="settings-fields">
             <Form.Item name="name" label="规则名称"><Input allowClear /></Form.Item>
-            <Form.Item name="entry" label="入口"><Select allowClear showSearch optionFilterProp="label" options={entries} /></Form.Item>
-            <Form.Item name="exit" label="出口"><Select allowClear showSearch optionFilterProp="label"
-              options={[{ value: 0, label: "直出" }, ...hops]} /></Form.Item>
+            <Form.Item name="entry" label="入口"><Select {...groupSelect} allowClear showSearch options={entries} /></Form.Item>
+            <Form.Item name="exit" label="出口"><Select {...groupSelect} allowClear showSearch
+              options={[{ value: 0, label: "直出", displayLabel: "直出" }, ...hops]} /></Form.Item>
             <Form.Item name="port" label="监听端口"><InputNumber min={1} max={65535} precision={0} style={{ width: "100%" }} /></Form.Item>
             <Form.Item name="target" label="目标地址或端口"><Input allowClear /></Form.Item>
           </div>
@@ -801,7 +819,7 @@ export default function Rules({ user, initialQuery, refreshUser, siteProbeInterv
                 const addresses = connectionAddresses(r);
                 return <div className="rule-cell rule-entry-cell">
                   <div className="rule-entry-meta">
-                    <span className="data-title">{r.entry ? names.get(r.entry) || r.entry : "未选择"}</span>
+                    <span className="data-title">{groupLabel(r.entry)}</span>
                     {addresses.length > 0 && <span className="protocol-label">{protocolLabel(r)}</span>}
                   </div>
                   {addresses.length > 0 && <div className="rule-entry-connection">
@@ -823,15 +841,15 @@ export default function Rules({ user, initialQuery, refreshUser, siteProbeInterv
                 return <div className="rule-cell">
                   {r.protocol === "haproxy-both" ? <>
                     <span className="data-title">TCP · HAProxy 直出</span>
-                    <span className="data-secondary">UDP · {describePath(r.path, r.routeRepair?.path)}</span>
-                  </> : <span className="data-title">{r.tlsShared ? "按 SNI 分流" : r.protocol === "haproxy-tcp" ? "HAProxy 直出" : describePath(r.path, r.routeRepair?.path)}</span>}
+                    <span className="data-secondary">UDP · {pathWithRatio(r.path, r.routeRepair?.path)}</span>
+                  </> : <span className="data-title">{r.tlsShared ? "按 SNI 分流" : r.protocol === "haproxy-tcp" ? "HAProxy 直出" : pathWithRatio(r.path, r.routeRepair?.path)}</span>}
                   {narrow ? <>
                     {targets.slice(0, 2).map((target, index) => <span className="data-secondary mono table-address" key={index}>{target}</span>)}
                     {targets.length > 2 && <button type="button" className="button-link rule-cell-link" onClick={() => setDetailID(r.id)}>
                       查看全部 {targets.length} 个目标
                     </button>}
                   </> : <span className="data-secondary mono">{r.targets?.join(", ")}</span>}
-                  {(!!r.backupPath?.length || r.routeRepair?.backupPath) && <span className="data-secondary">{r.protocol === "haproxy-both" ? "UDP 备用" : "备用"} · {describePath(r.backupPath, r.routeRepair?.backupPath)}</span>}
+                  {(!!r.backupPath?.length || r.routeRepair?.backupPath) && <span className="data-secondary">{r.protocol === "haproxy-both" ? "UDP 备用" : "备用"} · {pathWithRatio(r.backupPath, r.routeRepair?.backupPath)}</span>}
                 </div>;
               },
             },
@@ -960,12 +978,11 @@ export default function Rules({ user, initialQuery, refreshUser, siteProbeInterv
         confirmLoading={busy} okText="添加" okButtonProps={{ disabled: Boolean(creationBlock) }}>
         <Form name="rule-batch" form={bulkForm} layout="vertical" onFinish={addRules}>
           <Form.Item name="entry" label="入口设备组" rules={[{ required: true }]}>
-            <Select showSearch optionFilterProp="label" optionRender={renderGroupOption} options={entries} onChange={() => bulkForm.setFieldValue("path", [])} />
+            <Select {...groupSelect} showSearch options={entries} onChange={() => bulkForm.setFieldValue("path", [])} />
           </Form.Item>
           {chosenBulkEntry?.routing?.ingressMode !== "direct" && <Form.Item name="path" label="出口路径"
             rules={requiresExit(chosenBulkEntry) ? [{required:true}] : undefined}>
-            <MultiSelect maxCount={chosenBulkEntry?.routing?.ingressMode === "personal" ? 1 : 8}
-              optionFilterProp="label" optionRender={renderGroupOption}
+            <MultiSelect {...groupSelect} maxCount={chosenBulkEntry?.routing?.ingressMode === "personal" ? 1 : 8}
               options={exitOptions(chosenBulkEntry)} placeholder={requiresExit(chosenBulkEntry) ? "选择出口设备组" : "入口直出"} />
           </Form.Item>}
           <Form.Item name="targets" label="批量规则" rules={[{ required: true }]}>
@@ -981,13 +998,14 @@ export default function Rules({ user, initialQuery, refreshUser, siteProbeInterv
       </Modal>
       <Modal open={rerouting} title="批量切换规则" onCancel={() => setRerouting(false)} onOk={() => routeForm.submit()} confirmLoading={busy} okText="切换">
         <Form name="rule-reroute" form={routeForm} layout="vertical" onFinish={switchRoutes}>
-          <Form.Item name="entry" label="切换入口"><Select allowClear options={entries} placeholder="留空保留现有入口" /></Form.Item>
+          <Form.Item name="entry" label="切换入口"><Select {...groupSelect} allowClear options={entries} placeholder="留空保留现有入口" /></Form.Item>
           <Form.Item name="updatePath" label="同时切换出口" valuePropName="checked"><Switch /></Form.Item>
-          <Form.Item name="path" label="新出口路径"><MultiSelect options={hops} placeholder="切换出口时留空表示直出" /></Form.Item>
+          <Form.Item name="path" label="新出口路径"><MultiSelect {...groupSelect} options={hops} placeholder="切换出口时留空表示直出" /></Form.Item>
           <p className="dialog-note">更换入口时会从目标设备组重新分配端口。</p>
         </Form>
       </Modal>
-      {diagnosticRule && <RuleDiagnostics rule={diagnosticRule} entryName={names.get(diagnosticRule.entry)} describePath={describePath} onClose={() => setDiagnosticRule(undefined)} />}
+      {diagnosticRule && <RuleDiagnostics rule={diagnosticRule} entryGroup={groupsByID.get(diagnosticRule.entry)}
+        describePath={describePath} renderPath={pathWithRatio} onClose={() => setDiagnosticRule(undefined)} />}
       <Drawer open={!!addressRule} title="入口连接地址" onClose={() => setAddressRule(undefined)}>
         {addressRule && <Space direction="vertical" style={{width:"100%"}}>
           {connectionAddresses(addressRule).map((address, index) => <div className="connection-address" key={index}>
@@ -1021,19 +1039,20 @@ export default function Rules({ user, initialQuery, refreshUser, siteProbeInterv
             <div className="details-grid rule-details">
               <dl>
                 <dt>入口</dt>
-              <dd>{detail.entry ? names.get(detail.entry) || detail.entry : "未选择"}
-                {detail.entry > 0 && <>
-                  <div className="rule-entry-meta"><span className="protocol-label">{protocolLabel(detail)}</span></div>
+                <dd>
+                  <div className="rule-entry-meta">
+                    {groupLabel(detail.entry)}
+                    {detail.entry > 0 && <span className="protocol-label">{protocolLabel(detail)}</span>}
+                  </div>
                   {connectionAddresses(detail).map((address, index) => <div className="mono table-address" key={index}>{address}</div>)}
-                </>}
-              </dd>
+                </dd>
               </dl>
               <dl><dt>规则编号</dt><dd>#{detail.id}</dd></dl>
               {detail.protocol === "haproxy-tcp" || detail.protocol === "haproxy-both" ? <>
                 <dl><dt>TCP 路径</dt><dd>HAProxy 直连目标</dd></dl>
-                {detail.protocol === "haproxy-both" && <dl><dt>UDP 路径</dt><dd>{describePath(detail.path, detail.routeRepair?.path)}</dd></dl>}
-              </> : <dl><dt>出口</dt><dd>{describePath(detail.path, detail.routeRepair?.path)}</dd></dl>}
-              {(!!detail.backupPath?.length || detail.routeRepair?.backupPath) && <dl><dt>{detail.protocol === "haproxy-both" ? "UDP 备用路径" : "备用链路"}</dt><dd>{describePath(detail.backupPath, detail.routeRepair?.backupPath)}</dd></dl>}
+                {detail.protocol === "haproxy-both" && <dl><dt>UDP 路径</dt><dd>{pathWithRatio(detail.path, detail.routeRepair?.path)}</dd></dl>}
+              </> : <dl><dt>出口</dt><dd>{pathWithRatio(detail.path, detail.routeRepair?.path)}</dd></dl>}
+              {(!!detail.backupPath?.length || detail.routeRepair?.backupPath) && <dl><dt>{detail.protocol === "haproxy-both" ? "UDP 备用路径" : "备用链路"}</dt><dd>{pathWithRatio(detail.backupPath, detail.routeRepair?.backupPath)}</dd></dl>}
               <dl><dt>入站流量</dt><dd>{bytes(detail.in)}</dd></dl>
               <dl><dt>出站流量</dt><dd>{bytes(detail.out)}</dd></dl>
               <dl>
@@ -1102,7 +1121,7 @@ export default function Rules({ user, initialQuery, refreshUser, siteProbeInterv
               label="入口设备组"
               rules={[{ required: true }]}
             >
-              <Select showSearch optionFilterProp="label" optionRender={renderGroupOption} options={entries}
+              <Select {...groupSelect} showSearch options={entries}
                 placeholder="选择入口设备组" onChange={() => {
                   if (!editing?.routeRepair?.entry || ruleEntry) form.setFieldsValue({ path: [], backupPath: [] });
                   form.setFieldValue("confirmRoute", false);
@@ -1133,7 +1152,6 @@ export default function Rules({ user, initialQuery, refreshUser, siteProbeInterv
           {chosenEntry && <dl className="entry-summary">
             <div><dt>入口地址</dt><dd>{chosenEntry.connectHost?.split("\n").filter(Boolean).join("、") || "由设备提供"}</dd></div>
             <div><dt>端口池</dt><dd>{chosenEntry.portRanges || `${chosenEntry.firstPort}–${chosenEntry.lastPort}`}</dd></div>
-            <div><dt>流量倍率</dt><dd>{chosenEntry.ratio / 1000} 倍</dd></div>
           </dl>}
           {!!restrictions.length && <Descriptions size="small" column={1} className="alert-gap"
             items={restrictions.map(({ key, label, value }) => ({ key, label, children: value?.join("、") }))} />}
@@ -1153,10 +1171,8 @@ export default function Rules({ user, initialQuery, refreshUser, siteProbeInterv
               tooltip={mixedHAProxy ? "留空时 UDP 直出。选中出口后，UDP 使用该出口设备组配置的 GOST 传输协议。" :
                 "选择一个出口，或按转发顺序选择多跳。已配置的链式出口可直接选择。"}
               rules={requiresExit(chosenEntry) && !sharedTLS ? [{required:true}] : undefined}>
-              <MultiSelect
+              <MultiSelect {...groupSelect}
                 maxCount={chosenEntry.routing?.ingressMode === "personal" ? 1 : 8}
-                optionFilterProp="label"
-                optionRender={renderGroupOption}
                 options={exitOptions(chosenEntry, rulePath)}
                 placeholder={requiresExit(chosenEntry) || editing?.routeRepair?.path ? "选择出口设备组" : "入口直出"}
                 allowClear
@@ -1165,14 +1181,15 @@ export default function Rules({ user, initialQuery, refreshUser, siteProbeInterv
             {chosenEntry && !sharedTLS && (usesHAProxy || selectedHops.length > 0 || chosenEntry.routing?.ingressMode === "direct") &&
               <div className="route-preview" aria-label="转发路径">
                 {usesHAProxy && <div className="route-preview-row">
-                  <strong>TCP</strong><span>{chosenEntry.name}<ChevronRight size={13} aria-hidden="true" />目标地址</span>
+                  <strong>TCP</strong><span>{groupLabel(chosenEntry.id)}<ChevronRight size={13} aria-hidden="true" />目标地址</span>
                   <small>HAProxy 直连</small>
                 </div>}
                 {!pureHAProxy && <div className="route-preview-row">
                   {mixedHAProxy && <strong>UDP</strong>}
-                  <span>{chosenEntry.name}</span>
+                  {groupLabel(chosenEntry.id)}
                   {selectedHops.map((hop, index) => (
-                    <span key={index}><ChevronRight size={13} aria-hidden="true" />{hop?.name ?? "设备组"}
+                    <span key={index}><ChevronRight size={13} aria-hidden="true" />
+                      {hop ? groupLabel(hop.id, index === selectedHops.length - 1 && configuredExit?.kind !== "chain") : "设备组"}
                       {hop && hop.kind !== "chain" && <DismissibleTooltip title="设备组默认传输协议">
                         <small>{relayModeLabel(hop.relayMode)}</small>
                       </DismissibleTooltip>}
@@ -1202,7 +1219,7 @@ export default function Rules({ user, initialQuery, refreshUser, siteProbeInterv
               </Form.Item>
             )}
             {!pureHAProxy && chosenEntry?.routing?.ingressMode !== "direct" && <Form.Item name="backupPath" label={mixedHAProxy ? "UDP 备用路径" : "备用出口路径"}>
-              <MultiSelect optionFilterProp="label" optionRender={renderGroupOption}
+              <MultiSelect {...groupSelect}
                 maxCount={chosenEntry?.routing?.ingressMode === "personal" ? 1 : 8}
                 options={exitOptions(chosenEntry, backupPath)} placeholder="选择备用出口" allowClear />
             </Form.Item>}
@@ -1346,11 +1363,10 @@ export default function Rules({ user, initialQuery, refreshUser, siteProbeInterv
           </Form.Item>
           {(legacyInput || importing === "update") && <>
             <Form.Item name="entry" label="入口设备组" rules={[{ required: true }]}>
-              <Select showSearch optionFilterProp="label" optionRender={renderGroupOption} options={entries} onChange={() => importForm.setFieldValue("path", [])} />
+              <Select {...groupSelect} showSearch options={entries} onChange={() => importForm.setFieldValue("path", [])} />
             </Form.Item>
             {importing !== "update" && chosenImportEntry?.routing?.ingressMode !== "direct" && <Form.Item name="path" label="出口路径">
-              <MultiSelect maxCount={chosenImportEntry?.routing?.ingressMode === "personal" ? 1 : 8}
-                optionFilterProp="label" optionRender={renderGroupOption}
+              <MultiSelect {...groupSelect} maxCount={chosenImportEntry?.routing?.ingressMode === "personal" ? 1 : 8}
                 options={exitOptions(chosenImportEntry)} placeholder={requiresExit(chosenImportEntry) ? "选择出口设备组" : "入口直出"} />
             </Form.Item>}
           </>}

@@ -17,6 +17,7 @@ import { api, bytes, date, useData } from "./api";
 import type { Group, Node, NodeBandwidth, User } from "./api";
 import { useConfirmAction } from "./confirm-action";
 import DismissibleTooltip from "./dismissible-tooltip";
+import TrafficRatio from "./traffic-ratio";
 import IconAction from "./icon-action";
 import { NodeFlag, nodeDisplayName, nodeRegion } from "./node-location";
 
@@ -709,7 +710,7 @@ export default function Nodes({ user, lookingGlass, showExitIP }: { user: User; 
                     <Layers3 size={18} aria-hidden="true" />
                     <div>
                       {g.folder && <span className="data-secondary">{g.folder}</span>}
-                      <h2 id={"node-group-" + g.id}>{g.name}</h2>
+                      <h2 id={"node-group-" + g.id} className="rule-group-label">{g.name}<TrafficRatio ratio={g.ratio} /></h2>
                     </div>
                     <span className="node-count">{running.length} / {all.length} 在线</span>
                   </div>

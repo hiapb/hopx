@@ -1,11 +1,13 @@
 import { useEffect, useState } from "react";
+import type { ReactNode } from "react";
 import { Alert, Button, Modal, Pagination, Segmented, Spin, Tag } from "antd";
 import { Activity, ChevronLeft, ChevronRight, Clock3, Crosshair, GitBranch, RadioTower, RefreshCw, Route, Server } from "lucide-react";
 import { api } from "./api";
-import type { Rule } from "./api";
+import type { Group, Rule } from "./api";
 import DismissibleTooltip from "./dismissible-tooltip";
 import { NodeFlag, nodeDisplayName } from "./node-location";
 import { relayModeLabel } from "./relay-protocols";
+import TrafficRatio from "./traffic-ratio";
 
 type Step = { groupId?: number; transport?: string; status: string; phase?: string; latencyMs: number };
 type Trace = { steps: Step[]; target?: string };
@@ -63,7 +65,12 @@ const calendar = new Intl.DateTimeFormat("zh-CN", { month: "numeric", day: "nume
 const timestamp = (at: number) => calendar.format(at * 1000);
 const loss = (stats: Stats) => stats.attempts ? (stats.failed / stats.attempts * 100).toFixed(1).replace(/\.0$/, "") + "%" : "—";
 const average = (stats: Stats) => stats.attempts > stats.failed ? Math.round(stats.totalMs / (stats.attempts - stats.failed)) + " ms" : "—";
-const noMeasurement = (point: Point) => point.samples ? "已采样，无测量结果" : "未采样";
+function noMeasurement(point: Point, start: number, end: number, resolution: number) {
+  if (point.samples) return "已采样，无测量结果";
+  if (point.at < start) return "时段未完整覆盖";
+  if (point.at + resolution > end) return "当前时段待采样";
+  return "未采样";
+}
 const transportLabel = (transport?: string) => transport === "dtls" ? "DTLS" : transport === "reverse" ? "反向 TLS" : transport ? relayModeLabel(transport) : "";
 const entryDisplayName = (node: Entry) => nodeDisplayName(node, `入口 ${node.number}`);
 
@@ -72,7 +79,14 @@ function Status({ status }: { status: string }) {
   return <Tag color={color} className="diagnostic-tag">{label}</Tag>;
 }
 
-function HistoryChart({ points, range, label }: { points: Point[]; range: TimeRange; label: string }) {
+function HistoryChart({ points, range, label, start, end, interval }: {
+  points: Point[];
+  range: TimeRange;
+  label: string;
+  start: number;
+  end: number;
+  interval: number;
+}) {
   const [selection, setSelection] = useState<number>();
   const selectedIndex = points.findIndex(item => item.at === selection);
   const lastSample = points.map(item => (item.samples ?? item.attempts) > 0).lastIndexOf(true);
@@ -80,6 +94,8 @@ function HistoryChart({ points, range, label }: { points: Point[]; range: TimeRa
   const point = points[index];
   const maxLatency = Math.max(1, ...points.map(p => p.totalMs / Math.max(1, p.attempts - p.failed)));
   const axis = range === "live" ? clock : calendar;
+  const resolution = points.length > 1 ? points[1].at - points[0].at : interval;
+  const measurementLabel = (item: Point) => noMeasurement(item, start, end, resolution);
   return (
     <div className="diagnostic-chart" aria-label={label + "时间线"}>
       <div className="diagnostic-chart-head">
@@ -87,7 +103,7 @@ function HistoryChart({ points, range, label }: { points: Point[]; range: TimeRa
         <div className="diagnostic-point-controls">
           <Button type="text" size="small" icon={<ChevronLeft size={15} />} aria-label="上一时段" disabled={index === 0}
             onClick={() => setSelection(points[index - 1].at)} />
-          <span aria-live="polite">{timestamp(point.at)} · {point.attempts ? `${point.attempts} 次 · 丢包 ${loss(point)} · ${average(point)}` : noMeasurement(point)}</span>
+          <span aria-live="polite">{timestamp(point.at)} · {point.attempts ? `${point.attempts} 次 · 丢包 ${loss(point)} · ${average(point)}` : measurementLabel(point)}</span>
           <Button type="text" size="small" icon={<ChevronRight size={15} />} aria-label="下一时段" disabled={index === points.length - 1}
             onClick={() => setSelection(points[index + 1].at)} />
         </div>
@@ -97,9 +113,9 @@ function HistoryChart({ points, range, label }: { points: Point[]; range: TimeRa
           const latency = item.totalMs / Math.max(1, item.attempts - item.failed);
           const color = !item.attempts ? "empty" : item.failed === item.attempts ? "down" : item.failed > 0 ? "degraded" : "up";
           return (
-            <DismissibleTooltip key={item.at} title={timestamp(item.at) + (item.attempts ? " · 丢包 " + loss(item) + " · " + average(item) : " · " + noMeasurement(item))}>
+            <DismissibleTooltip key={item.at} title={timestamp(item.at) + (item.attempts ? " · 丢包 " + loss(item) + " · " + average(item) : " · " + measurementLabel(item))}>
               <button type="button" className="diagnostic-bar" data-state={color} aria-pressed={item.at === point?.at}
-                aria-label={timestamp(item.at) + (item.attempts ? " 丢包 " + loss(item) : " " + noMeasurement(item))}
+                aria-label={timestamp(item.at) + (item.attempts ? " 丢包 " + loss(item) : " " + measurementLabel(item))}
                 onClick={() => setSelection(item.at)}>
                 <span style={{ height: (color === "empty" ? 13 : Math.max(25, latency / maxLatency * 92)) + "%" }} />
               </button>
@@ -120,10 +136,11 @@ function HistoryChart({ points, range, label }: { points: Point[]; range: TimeRa
   );
 }
 
-export default function RuleDiagnostics({ rule, entryName, describePath, onClose }: {
+export default function RuleDiagnostics({ rule, entryGroup, describePath, renderPath, onClose }: {
   rule: Rule;
-  entryName?: string;
+  entryGroup?: Group;
   describePath: (path: number[] | null) => string;
+  renderPath: (path: number[] | null) => ReactNode;
   onClose: () => void;
 }) {
   const [snapshot, setSnapshot] = useState<{ page: number; revision: number; data: Diagnostic }>();
@@ -219,10 +236,14 @@ export default function RuleDiagnostics({ rule, entryName, describePath, onClose
   const stats = segment ?? summary;
   const points = segment?.points ?? summary?.points;
   const network = rule.effectiveNetwork || rule.protocol;
-  const header = [result?.entry || entryName, rule.tlsSharedPort || rule.port, network === "both" ? "TCP + UDP" : network.toUpperCase()].filter(Boolean).join(" · ");
+  const entryName = result?.entry || entryGroup?.name;
+  const header = [rule.tlsSharedPort || rule.port, network === "both" ? "TCP + UDP" : network.toUpperCase()].filter(Boolean).join(" · ");
   const nameFor = (step: { groupId?: number }, index: number, target: boolean) => target ? "目标地址" : step.groupId ? describePath([step.groupId]) : "第 " + (index + 1) + " 跳";
-  const currentPath = activeLane?.endsWith("-backup") ? result?.backupPath : result?.primaryPath;
-  const path = activeLane === "tcp-primary" && rule.protocol.startsWith("haproxy-") ? "HAProxy 直连" : describePath(currentPath ?? null);
+  const backup = activeLane?.endsWith("-backup");
+  const currentPath = backup ? result?.backupPath : result?.primaryPath;
+  const configuredPath = backup ? rule.backupPath : rule.path;
+  const path = activeLane === "tcp-primary" && rule.protocol.startsWith("haproxy-")
+    ? "HAProxy 直连" : renderPath(configuredPath?.length ? configuredPath : currentPath ?? null);
   const lastStep = trace?.steps.at(-1);
   const checkedRoute = activeLane?.endsWith("-backup") ? entry?.backup : entry?.primary;
   const failedStep = trace?.steps.some(step => step.status === "failed");
@@ -234,7 +255,10 @@ export default function RuleDiagnostics({ rule, entryName, describePath, onClose
       className="rule-diagnostics" onCancel={onClose}
       footer={<Button onClick={onClose}>关闭</Button>}>
       <div className="diagnostic-heading">
-        <div><h2>{rule.name}</h2><p>{header}</p></div>
+        <div><h2>{rule.name}</h2><p className="rule-group-label">
+          {entryName && <span className="rule-group-label">{entryName}<TrafficRatio ratio={entryGroup?.ratio} /></span>}
+          <span>{header}</span>
+        </p></div>
         <Button type="primary" icon={<RefreshCw size={15} />} loading={busy} onClick={() => {
           setRange("live");
           setAttempt(0);
@@ -339,15 +363,16 @@ export default function RuleDiagnostics({ rule, entryName, describePath, onClose
         <div className="diagnostic-section-head">
           <h3><Activity size={17} />{range === "live" ? "最近 1 小时" : "历史时间线"}</h3>
           {historyBusy ? <Spin size="small" /> : !!history?.completeBuckets &&
-            <span className="muted">采样覆盖 {history.sampledBuckets} / {history.completeBuckets} 个时段</span>}
+            <span className="muted">采样覆盖 {history.sampledBuckets} / {history.completeBuckets} 个完整时段</span>}
         </div>
-        {summary && stats && points?.length ? <>
+        {history && summary && stats && points?.length ? <>
           <div className="diagnostic-metrics">
             <div><span>探测丢包率</span><strong>{loss(stats)}</strong></div>
             <div><span>{segment ? "历史单跳均值" : "历史全链路均值"}</span><strong>{average(stats)}</strong></div>
             <div><span>失败 / 探测</span><strong>{stats.failed} / {stats.attempts}</strong></div>
           </div>
           <HistoryChart key={range + activeLane + selectedSegment} points={points} range={range}
+            start={history.start} end={history.end} interval={history.interval}
             label={segment ? nameFor(segment, segment.index, segment.target) : "端到端"} />
           {!!summary.segments?.length && <div className="diagnostic-segments">
             <button type="button" className="diagnostic-segment" aria-pressed={!segment} onClick={() => setSelectedSegment(undefined)}>
