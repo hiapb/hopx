@@ -1,6 +1,7 @@
 package node
 
 import (
+	"bufio"
 	"bytes"
 	"compress/gzip"
 	"context"
@@ -31,6 +32,7 @@ type proxyProcess struct {
 	socket    string
 	command   *exec.Cmd
 	done      chan struct{}
+	exitError error
 	counters  map[int64]*counter
 	last      map[int64][2]int64
 	frontends map[int64]proxyFrontend
@@ -100,12 +102,23 @@ type proxyFrontend struct {
 	metered bool
 }
 
-type proxyStartupLog struct{ bytes.Buffer }
+type proxyStartupLog struct {
+	mu sync.Mutex
+	b  bytes.Buffer
+}
 
 func (log *proxyStartupLog) Write(p []byte) (int, error) {
-	keep := min(len(p), max(0, 4096-log.Len()))
-	_, _ = log.Buffer.Write(p[:keep])
+	log.mu.Lock()
+	defer log.mu.Unlock()
+	keep := min(len(p), max(0, 4096-log.b.Len()))
+	_, _ = log.b.Write(p[:keep])
 	return len(p), nil
+}
+
+func (log *proxyStartupLog) String() string {
+	log.mu.Lock()
+	defer log.mu.Unlock()
+	return strings.TrimSpace(log.b.String())
 }
 
 type proxyEngine struct {
@@ -332,6 +345,43 @@ func (p *proxyProcess) sample() (int, error) {
 	}
 }
 
+func (p *proxyProcess) checkReady(ctx context.Context) error {
+	const probeTimeout = 250 * time.Millisecond
+	dialer := net.Dialer{Timeout: probeTimeout}
+	conn, err := dialer.DialContext(ctx, "unix", p.socket)
+	if err != nil {
+		return err
+	}
+	defer conn.Close()
+	deadline := time.Now().Add(probeTimeout)
+	if limit, ok := ctx.Deadline(); ok && limit.Before(deadline) {
+		deadline = limit
+	}
+	_ = conn.SetDeadline(deadline)
+	if _, err := io.WriteString(conn, "show info\n"); err != nil {
+		return err
+	}
+	info := bufio.NewScanner(io.LimitReader(conn, 16<<10))
+	ready := false
+	for info.Scan() {
+		if pid, ok := strings.CutPrefix(info.Text(), "Pid:"); ok {
+			if strings.TrimSpace(pid) != strconv.Itoa(p.command.Process.Pid) {
+				return errors.New("unexpected HAProxy process on management socket")
+			}
+			ready = true
+		}
+	}
+	if err := info.Err(); err != nil {
+		return err
+	}
+	if ready {
+		return nil
+	}
+	return errors.New("HAProxy management socket returned no process ID")
+}
+
+const proxySyncDNS = " init-addr last,libc,none"
+
 func safeProxyAddress(address string, bind bool) bool {
 	host, port, err := net.SplitHostPort(address)
 	n, portErr := strconv.Atoi(port)
@@ -395,7 +445,7 @@ func proxyConfig(rules []proxyRule, hosts []string, maxConnections int) (string,
 			host, _, _ := net.SplitHostPort(target)
 			resolve := ""
 			if net.ParseIP(host) == nil {
-				resolve = " resolvers hopx_dns resolve-opts allow-dup-ip init-addr last,libc,none"
+				resolve = " resolvers hopx_dns resolve-opts allow-dup-ip" + proxySyncDNS
 			}
 			fmt.Fprintf(&config, "    server target_%d %s%s\n", i+1, target, resolve)
 		}
@@ -445,16 +495,59 @@ func (e *Engine) stageProxy(ctx context.Context, rules []proxyRule, pending map[
 			files = append(files, file)
 		}
 	}
+	// A retry after a startup timeout uses the same persisted snapshot.
+	persist := sync.OnceValue(save)
+	process, err := startProxy(ctx, binary, config, files, rules, persist)
+	if errors.Is(err, errProxyStartupTimeout) && ctx.Err() == nil && strings.Contains(config, proxySyncDNS) {
+		// Keep libc resolution for ordinary startups (including hosts-file
+		// overrides). If it stalls, leave DNS to HAProxy's runtime resolver.
+		fallback := strings.ReplaceAll(config, proxySyncDNS, " init-addr none")
+		process, err = startProxy(ctx, binary, fallback, files, rules, persist)
+	}
+	return process, config, err
+}
+
+var errProxyStartupTimeout = errors.New("HAProxy startup timed out")
+
+func startProxy(ctx context.Context, binary, config string, files []*os.File, rules []proxyRule, save func() error) (*proxyProcess, error) {
 	dir, err := os.MkdirTemp("/tmp", "hopx-ha-")
 	if err != nil {
-		return nil, "", err
+		return nil, err
 	}
+	started := false
+	defer func() {
+		if !started {
+			_ = os.RemoveAll(dir)
+		}
+	}()
 	path := filepath.Join(dir, "haproxy.cfg")
 	socket := filepath.Join(dir, "admin.sock")
 	content := "global\n    stats socket " + socket + " mode 600 level admin\n" + config
 	if err := os.WriteFile(path, []byte(content), 0600); err != nil {
-		_ = os.RemoveAll(dir)
-		return nil, "", err
+		return nil, err
+	}
+	// Validate the generated configuration and persist it before any new
+	// worker starts accepting traffic on the shared sockets.
+	checkCtx, cancelCheck := context.WithTimeout(ctx, 3*time.Second)
+	check := exec.CommandContext(checkCtx, binary, "-c", "-f", path)
+	check.ExtraFiles = files
+	check.WaitDelay = time.Second
+	var checkLog proxyStartupLog
+	check.Stderr = &checkLog
+	checkErr := check.Run()
+	checkContextErr := checkCtx.Err()
+	cancelCheck()
+	if ctx.Err() != nil {
+		return nil, ctx.Err()
+	}
+	if checkErr != nil {
+		if errors.Is(checkContextErr, context.DeadlineExceeded) {
+			return nil, fmt.Errorf("%w during configuration check: %s", errProxyStartupTimeout, checkLog.String())
+		}
+		return nil, fmt.Errorf("HAProxy configuration rejected: %w: %s", checkErr, checkLog.String())
+	}
+	if err := save(); err != nil {
+		return nil, err
 	}
 	command := exec.CommandContext(ctx, binary, "-db", "-f", path)
 	command.ExtraFiles = files
@@ -464,47 +557,38 @@ func (e *Engine) stageProxy(ctx context.Context, rules []proxyRule, pending map[
 		last: make(map[int64][2]int64), frontends: make(map[int64]proxyFrontend, len(rules)),
 		log: proxyTrafficLog{closed: make(map[int64][2]int64, len(rules))}}
 	command.Stdout = &p.log
-	// Validate the generated configuration and persist it before any new
-	// worker starts accepting traffic on the shared sockets.
-	check := exec.CommandContext(ctx, binary, "-c", "-f", path)
-	check.ExtraFiles = files
-	check.Stderr = &stderr
-	if err := check.Run(); err != nil {
-		_ = os.RemoveAll(dir)
-		return nil, "", fmt.Errorf("HAProxy configuration rejected: %w: %s", err, strings.TrimSpace(stderr.String()))
-	}
-	stderr.Reset()
-	if err := save(); err != nil {
-		_ = os.RemoveAll(dir)
-		return nil, "", err
-	}
-	if err := command.Start(); err != nil {
-		_ = os.RemoveAll(dir)
-		return nil, "", err
-	}
 	for _, rule := range rules {
 		p.counters[rule.ID] = rule.stats
 		p.frontends[rule.ID] = proxyFrontend{expires: rule.Expires, targets: len(rule.Targets), metered: meteredProxy(rule.Forward)}
 	}
+	if err := command.Start(); err != nil {
+		return nil, fmt.Errorf("start HAProxy: %w", err)
+	}
+	started = true
 	go func() {
-		_ = command.Wait()
+		p.exitError = command.Wait()
 		_ = os.RemoveAll(dir)
 		close(p.done)
 	}()
-	timer := time.NewTimer(5 * time.Second)
-	defer timer.Stop()
+	startCtx, cancelStart := context.WithTimeout(ctx, 5*time.Second)
+	defer cancelStart()
 	tick := time.NewTicker(25 * time.Millisecond)
 	defer tick.Stop()
+	var lastProbe error
 	for {
 		select {
 		case <-p.done:
-			return nil, "", fmt.Errorf("HAProxy failed to start: %s", strings.TrimSpace(stderr.String()))
-		case <-timer.C:
+			return nil, fmt.Errorf("HAProxy exited before becoming ready (%v): %s", p.exitError, stderr.String())
+		case <-startCtx.Done():
 			p.stop()
-			return nil, "", errors.New("HAProxy startup timed out")
+			if ctx.Err() != nil {
+				return nil, ctx.Err()
+			}
+			return nil, fmt.Errorf("%w waiting for management socket (%v): %s", errProxyStartupTimeout, lastProbe, stderr.String())
 		case <-tick.C:
-			if _, err := p.sample(); err == nil && p.running() {
-				return p, config, nil
+			lastProbe = p.checkReady(startCtx)
+			if lastProbe == nil && p.running() {
+				return p, nil
 			}
 		}
 	}

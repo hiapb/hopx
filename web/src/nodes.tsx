@@ -432,9 +432,13 @@ export default function Nodes({ user, lookingGlass, showExitIP }: { user: User; 
     name: rollout.name ?? "",
   });
   const rolloutReason = rollout?.reason?.trim();
-  const rolloutFailure = rolloutReason?.startsWith(`${rollout?.version}:`)
-    ? (/deadline exceeded|timeout/i.test(rolloutReason) ? "下载更新包超时" : "节点升级失败")
-    : rolloutReason;
+  let rolloutFailure = rolloutReason;
+  if (rolloutReason?.startsWith(`${rollout?.version}:`)) {
+    if (/HAProxy startup timed out/i.test(rolloutReason)) rolloutFailure = "HAProxy 启动超时";
+    else if (/HAProxy (configuration rejected|exited before becoming ready)|start HAProxy:/i.test(rolloutReason)) rolloutFailure = "HAProxy 启动失败";
+    else if (/\bGet\s.*(?:deadline exceeded|timeout)/i.test(rolloutReason)) rolloutFailure = "下载更新包超时";
+    else rolloutFailure = "节点升级失败";
+  }
   const historyPeak = history.reduce((peak, point) => Math.max(peak, point.in, point.out), 0);
   const bandwidth = sumBandwidth(visibleNodes);
   const summary = [

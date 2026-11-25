@@ -270,8 +270,6 @@ export default function Rules({ user, initialQuery, refreshUser, siteProbeInterv
       : rule.protocol === "haproxy-tcp" ? "HAProxy TCP"
         : rule.protocol === "haproxy-both" ? "HAProxy TCP + UDP"
         : (rule.effectiveNetwork || rule.protocol).replace("both", "TCP + UDP").toUpperCase();
-  const describePort = (rule: Rule, address = connectionAddresses(rule)[0]) =>
-    rule.entry ? address + " / " + protocolLabel(rule) : "—";
   const detail = list.value.find((rule) => rule.id === detailID);
 
   function resetPage() {
@@ -799,9 +797,9 @@ export default function Rules({ user, initialQuery, refreshUser, siteProbeInterv
               width: narrow ? 188 : undefined,
               render: (_, r) => {
                 const addresses = connectionAddresses(r);
-                return <div className="rule-cell">
+                return <div className="rule-cell rule-entry-cell">
                   <span className="data-title">{r.entry ? names.get(r.entry) || r.entry : "未选择"}</span>
-                  {narrow ? addresses.length > 0 && <>
+                  {addresses.length > 0 && <>
                     <button type="button" className="button-link rule-entry-address mono"
                       aria-label={"查看入口连接地址 " + addresses[0]} onClick={() => setAddressRule(r)}>{addresses[0]}</button>
                     <div className="rule-entry-meta">
@@ -810,11 +808,6 @@ export default function Rules({ user, initialQuery, refreshUser, siteProbeInterv
                         {addresses.length} 个地址
                       </button>}
                     </div>
-                  </> : <>
-                    <span className="data-secondary mono">{describePort(r, addresses[0])}</span>
-                    {addresses.length > 1 && <Button type="link" size="small" onClick={() => setAddressRule(r)}>
-                      {addresses.length} 个连接地址
-                    </Button>}
                   </>}
                 </div>;
               },

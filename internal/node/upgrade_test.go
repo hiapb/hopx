@@ -17,8 +17,9 @@ import (
 )
 
 func TestUpgradeConfirmsWithUnreachableForwardTarget(t *testing.T) {
-	t.Run("fresh config", func(t *testing.T) { testUpgradeConfirmation(t, false) })
-	t.Run("cached config with stale apply error", func(t *testing.T) { testUpgradeConfirmation(t, true) })
+	t.Run("fresh config", func(t *testing.T) { testUpgradeConfirmation(t, false, false) })
+	t.Run("cached config with stale apply error", func(t *testing.T) { testUpgradeConfirmation(t, true, false) })
+	t.Run("current config replaces a cached listener conflict", func(t *testing.T) { testUpgradeConfirmation(t, true, true) })
 }
 
 func TestCandidateRecordsStartupFailure(t *testing.T) {
@@ -45,7 +46,7 @@ func TestCandidateRecordsStartupFailure(t *testing.T) {
 	}
 }
 
-func testUpgradeConfirmation(t *testing.T, cached bool) {
+func testUpgradeConfirmation(t *testing.T, cached, conflict bool) {
 	t.Helper()
 	stateDir := t.TempDir()
 	if err := toFile(filepath.Join(stateDir, "identity.json"), localState{Identity: wire.Identity{ID: 1, Token: "test"}}); err != nil {
@@ -63,7 +64,18 @@ func testUpgradeConfirmation(t *testing.T, cached bool) {
 		Rule: wire.Rule{ID: 1, Enabled: true, Protocol: "tcp", Port: port, Targets: []string{"127.0.0.1:0"}},
 	}}}
 	if cached {
-		if err := toFile(filepath.Join(stateDir, "active-routes.json"), config); err != nil {
+		previous := config
+		if conflict {
+			listener, err := net.Listen("tcp", "127.0.0.1:0")
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer listener.Close()
+			previous.Revision = "obsolete-config"
+			previous.Rules = append([]wire.Forward(nil), config.Rules...)
+			previous.Rules[0].Port = listener.Addr().(*net.TCPAddr).Port
+		}
+		if err := toFile(filepath.Join(stateDir, "active-routes.json"), previous); err != nil {
 			t.Fatal(err)
 		}
 		if err := os.WriteFile(filepath.Join(stateDir, "apply.error"), []byte("previous config failed\n"), 0600); err != nil {

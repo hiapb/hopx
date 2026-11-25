@@ -300,6 +300,7 @@ func Run(ctx context.Context, settings Settings) (runErr error) {
 		startupCache = legacyCached
 	}
 	var config wire.Config
+	var upgradeErr error
 	if e = fromFile(startupCache, &config); e == nil {
 		if e = wire.DecodeRoutes(config.Rules, config.RouteSets, config.HopTable); e != nil {
 			return fmt.Errorf("load last applied routes: %w", e)
@@ -318,9 +319,9 @@ func Run(ctx context.Context, settings Settings) (runErr error) {
 			startup.Revision = "waiting-for-traffic-sync"
 		}
 		if e = engine.Apply(dataContext, startup, nil); e != nil {
-			if verifyUpgrade {
-				return fmt.Errorf("load last applied config: %w", e)
-			}
+			// A valid cached snapshot may contain a listener the panel has already
+			// changed. Let the candidate request the current snapshot before rollback.
+			upgradeErr = fmt.Errorf("load last applied config: %w", e)
 			slog.Warn("load last applied config", "error", e)
 			_ = atomicFile(filepath.Join(settings.Directory, "apply.error"), []byte(e.Error()), 0600)
 			config = wire.Config{}
@@ -333,7 +334,6 @@ func Run(ctx context.Context, settings Settings) (runErr error) {
 	upgradeDeadline := time.Now().Add(40 * time.Second)
 	upgradeHealthy := 0
 	upgradeRevision := ""
-	var upgradeErr error
 	managedUpgrade := settings.PublicKey != "" && settings.Executable != ""
 	spool := filepath.Join(settings.Directory, "reports")
 	if e = os.MkdirAll(spool, 0700); e != nil {

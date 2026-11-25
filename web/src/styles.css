@@ -788,6 +788,17 @@ button:focus-visible, a:focus-visible { outline: 2px solid var(--accent); outlin
 .rules-table .rule-name { max-width: 100%; overflow-wrap: anywhere; }
 .button-link:hover { color: var(--accent); text-decoration: underline; }
 .rule-entry-meta { display: flex; flex-wrap: wrap; align-items: center; gap: 4px 8px; }
+.rules-table .rule-entry-cell { display: grid; gap: 2px; min-width: 0; }
+.rules-table .button-link.rule-entry-address {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: var(--muted);
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 12px;
+}
+.rules-table .button-link.rule-cell-link { color: var(--accent); font-size: 12px; }
+.rules-table .rule-entry-meta .protocol-label { font-size: 11px; padding: 1px 5px; }
 .rule-details .rule-entry-meta { margin-block: 4px; }
 .table-address { overflow-wrap: anywhere; }
 .advanced-toggle.ant-btn { padding-inline: 0; }
@@ -1282,16 +1293,6 @@ textarea.dialog-code.ant-input:hover, textarea.dialog-code.ant-input:focus { bor
     -webkit-line-clamp: 2;
     overflow: hidden;
   }
-  .rules-table .button-link.rule-entry-address {
-    overflow: hidden;
-    text-overflow: ellipsis;
-    white-space: nowrap;
-    color: var(--muted);
-    font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
-    font-size: 12px;
-  }
-  .rules-table .button-link.rule-cell-link { color: var(--accent); font-size: 12px; }
-  .rules-table .rule-entry-meta .protocol-label { font-size: 11px; padding: 1px 5px; }
   .table-section .operator-toolbar { display: grid; grid-template-columns: minmax(0, 1fr); gap: 6px; }
   .table-section .operator-toolbar > .operator-actions:empty { display: none; }
   :is(.table-section, .settings-page) :is(.operator-filters, .operator-actions.ant-space, .operator-actions > .ant-space, .list-toolbar, .batch-toolbar) {
