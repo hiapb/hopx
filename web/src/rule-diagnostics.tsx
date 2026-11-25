@@ -28,10 +28,11 @@ type Diagnostic = {
 };
 
 type Stats = { attempts: number; failed: number; totalMs: number };
-type Point = Stats & { at: number; samples?: number };
+type Point = Stats & { at: number; samples: number; expected: number; recorded: number; status: string };
 type Segment = Stats & { index: number; groupId: number; transport: string; target: boolean; points: Point[] };
 type Lane = Stats & { network: string; lane: string; points: Point[]; segments: Segment[] | null };
-type History = { lanes: Lane[]; latest: number; start: number; end: number; interval: number; sampledBuckets: number; completeBuckets: number };
+type History = { lanes: Lane[]; points: Point[]; latest: number; interval: number; sampledBuckets: number; completeBuckets: number;
+  current: { at: number; status: string } };
 type TimeRange = "live" | "1d" | "3d" | "7d";
 
 const ranges: { label: string; value: TimeRange }[] = [{ label: "实时", value: "live" }, { label: "最近 1 天", value: "1d" },
@@ -65,11 +66,30 @@ const calendar = new Intl.DateTimeFormat("zh-CN", { month: "numeric", day: "nume
 const timestamp = (at: number) => calendar.format(at * 1000);
 const loss = (stats: Stats) => stats.attempts ? (stats.failed / stats.attempts * 100).toFixed(1).replace(/\.0$/, "") + "%" : "—";
 const average = (stats: Stats) => stats.attempts > stats.failed ? Math.round(stats.totalMs / (stats.attempts - stats.failed)) + " ms" : "—";
-function noMeasurement(point: Point, start: number, end: number, resolution: number) {
-  if (point.samples) return "已采样，无测量结果";
-  if (point.at < start) return "时段未完整覆盖";
-  if (point.at + resolution > end) return "当前时段待采样";
-  return "未采样";
+const periodLabels: Record<string, string> = {
+  pending: "等待采样",
+  awaiting: "等待回报",
+  sampled: "已收到样本",
+  unmeasured: "已回报，无测量结果",
+  offline: "入口离线",
+  no_entry: "暂无入口设备",
+  timeout: "等待入口回报超时",
+  unclaimed: "未确认任务送达",
+  backlog: "入口繁忙或任务积压",
+  not_ready: "入口配置尚未就绪",
+  other_cadence: "当时使用另一采样间隔",
+  unreported: "没有记录到样本",
+  mixed: "包含多个采样时段",
+  paused: "规则已暂停",
+  unsupported: "此规则类型不支持定时采样",
+};
+
+function pointLabel(point: Point) {
+  const coverage = point.expected > 1 ? ` · 样本 ${point.recorded} / ${point.expected}` : "";
+  if (point.attempts) return `${point.attempts} 次 · 丢包 ${loss(point)} · ${average(point)}${coverage}`;
+  if (point.samples) return "已采样，无测量结果" + coverage;
+  if (point.status === "sampled") return "此链路无测量结果" + coverage;
+  return (periodLabels[point.status] ?? periodLabels.unreported) + coverage;
 }
 const transportLabel = (transport?: string) => transport === "dtls" ? "DTLS" : transport === "reverse" ? "反向 TLS" : transport ? relayModeLabel(transport) : "";
 const entryDisplayName = (node: Entry) => nodeDisplayName(node, `入口 ${node.number}`);
@@ -79,23 +99,17 @@ function Status({ status }: { status: string }) {
   return <Tag color={color} className="diagnostic-tag">{label}</Tag>;
 }
 
-function HistoryChart({ points, range, label, start, end, interval }: {
+function HistoryChart({ points, range, label }: {
   points: Point[];
   range: TimeRange;
   label: string;
-  start: number;
-  end: number;
-  interval: number;
 }) {
   const [selection, setSelection] = useState<number>();
   const selectedIndex = points.findIndex(item => item.at === selection);
-  const lastSample = points.map(item => (item.samples ?? item.attempts) > 0).lastIndexOf(true);
-  const index = selectedIndex >= 0 ? selectedIndex : lastSample >= 0 ? lastSample : points.length - 1;
+  const index = selectedIndex >= 0 ? selectedIndex : points.length - 1;
   const point = points[index];
   const maxLatency = Math.max(1, ...points.map(p => p.totalMs / Math.max(1, p.attempts - p.failed)));
   const axis = range === "live" ? clock : calendar;
-  const resolution = points.length > 1 ? points[1].at - points[0].at : interval;
-  const measurementLabel = (item: Point) => noMeasurement(item, start, end, resolution);
   return (
     <div className="diagnostic-chart" aria-label={label + "时间线"}>
       <div className="diagnostic-chart-head">
@@ -103,7 +117,7 @@ function HistoryChart({ points, range, label, start, end, interval }: {
         <div className="diagnostic-point-controls">
           <Button type="text" size="small" icon={<ChevronLeft size={15} />} aria-label="上一时段" disabled={index === 0}
             onClick={() => setSelection(points[index - 1].at)} />
-          <span aria-live="polite">{timestamp(point.at)} · {point.attempts ? `${point.attempts} 次 · 丢包 ${loss(point)} · ${average(point)}` : measurementLabel(point)}</span>
+          <span aria-live="polite">{timestamp(point.at)} · {pointLabel(point)}</span>
           <Button type="text" size="small" icon={<ChevronRight size={15} />} aria-label="下一时段" disabled={index === points.length - 1}
             onClick={() => setSelection(points[index + 1].at)} />
         </div>
@@ -113,9 +127,9 @@ function HistoryChart({ points, range, label, start, end, interval }: {
           const latency = item.totalMs / Math.max(1, item.attempts - item.failed);
           const color = !item.attempts ? "empty" : item.failed === item.attempts ? "down" : item.failed > 0 ? "degraded" : "up";
           return (
-            <DismissibleTooltip key={item.at} title={timestamp(item.at) + (item.attempts ? " · 丢包 " + loss(item) + " · " + average(item) : " · " + measurementLabel(item))}>
+            <DismissibleTooltip key={item.at} title={timestamp(item.at) + " · " + pointLabel(item)}>
               <button type="button" className="diagnostic-bar" data-state={color} aria-pressed={item.at === point?.at}
-                aria-label={timestamp(item.at) + (item.attempts ? " 丢包 " + loss(item) : " " + measurementLabel(item))}
+                aria-label={timestamp(item.at) + " " + pointLabel(item)}
                 onClick={() => setSelection(item.at)}>
                 <span style={{ height: (color === "empty" ? 13 : Math.max(25, latency / maxLatency * 92)) + "%" }} />
               </button>
@@ -130,7 +144,7 @@ function HistoryChart({ points, range, label, start, end, interval }: {
       </div>
       <div className="diagnostic-legend" aria-label="时间线图例">
         <span data-state="up">正常</span><span data-state="degraded">部分失败</span>
-        <span data-state="down">失败</span><span data-state="empty">无样本</span>
+        <span data-state="down">失败</span><span data-state="empty">无测量结果</span>
       </div>
     </div>
   );
@@ -202,17 +216,21 @@ export default function RuleDiagnostics({ rule, entryGroup, describePath, render
     const request = new AbortController();
     let timer: number | undefined;
     async function load() {
+      let delay = 30_000;
       try {
         const data = await api<History>(`/rules/${rule.id}/diagnose/history?range=${range}`, "GET", undefined, request.signal);
         if (request.signal.aborted) return;
         setHistoryResponse({ ruleId: rule.id, range, data });
         setHistoryError("");
+        if (data.points.at(-1)?.status === "awaiting") {
+          delay = 6_000;
+        }
       } catch (error) {
         if (!request.signal.aborted) setHistoryError((error as Error).message);
       } finally {
         if (!request.signal.aborted) {
           setHistoryBusy(false);
-          if (range === "live") timer = window.setTimeout(load, 30_000);
+          if (range === "live") timer = window.setTimeout(load, delay);
         }
       }
     }
@@ -234,7 +252,7 @@ export default function RuleDiagnostics({ rule, entryGroup, describePath, render
   const traces = live?.traces ?? [];
   const trace = traces[attempt] ?? traces[0];
   const stats = segment ?? summary;
-  const points = segment?.points ?? summary?.points;
+  const points = segment?.points ?? summary?.points ?? history?.points;
   const network = rule.effectiveNetwork || rule.protocol;
   const entryName = result?.entry || entryGroup?.name;
   const header = [rule.tlsSharedPort || rule.port, network === "both" ? "TCP + UDP" : network.toUpperCase()].filter(Boolean).join(" · ");
@@ -269,7 +287,7 @@ export default function RuleDiagnostics({ rule, entryGroup, describePath, render
       <div className="diagnostic-toolbar">
         <Segmented<TimeRange> aria-label="诊断时间范围" options={ranges} value={range} onChange={setRange} />
         <div className="diagnostic-sampling">
-          {history?.interval && <span><Clock3 size={14} aria-hidden="true" />目标间隔 {history.interval / 60} 分钟</span>}
+          {!!history?.interval && <span><Clock3 size={14} aria-hidden="true" />每 {history.interval / 60} 分钟采样</span>}
           {history?.latest ? <span>上次收到样本 {timestamp(history.latest)}</span> : null}
         </div>
       </div>
@@ -363,18 +381,22 @@ export default function RuleDiagnostics({ rule, entryGroup, describePath, render
         <div className="diagnostic-section-head">
           <h3><Activity size={17} />{range === "live" ? "最近 1 小时" : "历史时间线"}</h3>
           {historyBusy ? <Spin size="small" /> : !!history?.completeBuckets &&
-            <span className="muted">采样覆盖 {history.sampledBuckets} / {history.completeBuckets} 个完整时段</span>}
+            <span className="muted">收到样本 {history.sampledBuckets} / {history.completeBuckets} 个完整时段</span>}
         </div>
-        {history && summary && stats && points?.length ? <>
-          <div className="diagnostic-metrics">
+        {liveRange && history?.current && <div className="diagnostic-current">
+          <Clock3 size={14} aria-hidden="true" />
+          <span>当前时段 {clock.format(history.current.at * 1000)}–{clock.format((history.current.at + history.interval) * 1000)}</span>
+          <Tag color={history.current.status === "sampled" ? "success" : "default"} className="diagnostic-tag">{periodLabels[history.current.status]}</Tag>
+        </div>}
+        {history && !!points?.length ? <>
+          {stats && <div className="diagnostic-metrics">
             <div><span>探测丢包率</span><strong>{loss(stats)}</strong></div>
             <div><span>{segment ? "历史单跳均值" : "历史全链路均值"}</span><strong>{average(stats)}</strong></div>
             <div><span>失败 / 探测</span><strong>{stats.failed} / {stats.attempts}</strong></div>
-          </div>
+          </div>}
           <HistoryChart key={range + activeLane + selectedSegment} points={points} range={range}
-            start={history.start} end={history.end} interval={history.interval}
             label={segment ? nameFor(segment, segment.index, segment.target) : "端到端"} />
-          {!!summary.segments?.length && <div className="diagnostic-segments">
+          {!!summary?.segments?.length && <div className="diagnostic-segments">
             <button type="button" className="diagnostic-segment" aria-pressed={!segment} onClick={() => setSelectedSegment(undefined)}>
               <span>端到端</span><strong>{loss(summary)}</strong><span>{average(summary)}</span><ChevronRight size={14} />
             </button>

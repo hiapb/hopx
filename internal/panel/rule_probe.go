@@ -2,15 +2,11 @@ package panel
 
 import (
 	"cmp"
-	"context"
 	"database/sql"
 	"encoding/json"
 	"errors"
-	"log/slog"
 	"net/http"
 	"slices"
-	"strconv"
-	"strings"
 	"time"
 
 	"hopx/internal/wire"
@@ -48,156 +44,6 @@ func boundedProbeLinks(links []wire.LinkProbe, attempts int) []wire.LinkProbe {
 	return links
 }
 
-func (s *Server) saveRuleProbe(ctx context.Context, ruleID int64, links []wire.LinkProbe) {
-	if !slices.ContainsFunc(links, func(link wire.LinkProbe) bool { return len(link.Traces) != 0 }) {
-		return
-	}
-	data, err := json.Marshal(links)
-	if err != nil {
-		return
-	}
-	at := time.Now().Unix()
-	// Use minute keys for new rows. Cadence checks use sampled so they include rows
-	// stored with five-minute keys by older panels and survive interval changes.
-	_, err = s.db.ExecContext(ctx, `INSERT OR IGNORE INTO rule_probe_samples(rule,bucket,sampled,links)
-		SELECT r.id,?,?,? FROM rules r JOIN users u ON u.id=r.owner
-		WHERE r.id=? AND json_extract(r.json,'$.enabled')=1 AND `+ruleServiceActiveSQL+` AND `+ruleRouteReadySQL+`
-		AND NOT EXISTS (SELECT 1 FROM rule_probe_samples p WHERE p.rule=r.id
-			AND p.sampled>?-(`+ruleProbeIntervalSQL+`))`, at/60, at, string(data), ruleID, at)
-	if err != nil && ctx.Err() == nil {
-		slog.Warn("save rule probe", "rule", ruleID, "error", err)
-	}
-}
-
-const maxBackgroundChecks = 16
-
-func (s *Server) monitorRuleLinks(ctx context.Context) {
-	ticker := time.NewTicker(2 * time.Second)
-	defer ticker.Stop()
-	var cursor int64
-	for {
-		select {
-		case <-ctx.Done():
-			return
-		case <-ticker.C:
-			next, err := s.probeRuleBatch(ctx, cursor)
-			if err != nil && ctx.Err() == nil {
-				slog.Warn("schedule rule probes", "error", err)
-			}
-			cursor = next
-		}
-	}
-}
-
-func (s *Server) probeRuleBatch(ctx context.Context, cursor int64) (int64, error) {
-	now := time.Now()
-	nodes := make(map[int64][]wire.Device)
-	inFlight := make(map[int64]bool)
-	free := maxBackgroundChecks
-	s.mu.RLock()
-	for _, check := range s.diagnostics {
-		if check.background && now.Before(check.expires) {
-			free--
-			inFlight[check.task.RuleID] = true
-		}
-	}
-	for _, node := range s.devices {
-		if !node.AcceptLinkProbe || node.ApplyError != "" || now.Sub(node.LastSeen) >= 20*time.Second ||
-			s.diagnostics[node.ID].expires.After(now) || node.Metrics.CPU >= 85 ||
-			(node.Metrics.ConnectionLimit > 0 && node.Metrics.Connections*10 >= int64(node.Metrics.ConnectionLimit)*9) {
-			continue
-		}
-		nodes[node.GroupID] = append(nodes[node.GroupID], node)
-	}
-	s.mu.RUnlock()
-	if len(nodes) == 0 || free <= 0 {
-		return cursor, nil
-	}
-
-	for _, devices := range nodes {
-		slices.SortFunc(devices, func(a, b wire.Device) int { return cmp.Compare(a.ID, b.ID) })
-	}
-	groups := make([]string, 0, len(nodes))
-	for group := range nodes {
-		groups = append(groups, strconv.FormatInt(group, 10))
-	}
-	rows, err := s.db.QueryContext(ctx, `SELECT r.id,r.entry,`+ruleProbeIntervalSQL+` FROM rules r JOIN users u ON u.id=r.owner
-		WHERE r.id>? AND r.entry IN (`+strings.Join(groups, ",")+`) AND json_extract(r.json,'$.enabled')=1
-		AND `+ruleServiceActiveSQL+` AND `+ruleRouteReadySQL+`
-		AND coalesce(json_extract(r.json,'$.tlsShared'),0)=0
-		AND NOT EXISTS(SELECT 1 FROM rule_probe_samples p WHERE p.rule=r.id AND p.sampled>?-(`+ruleProbeIntervalSQL+`))
-		ORDER BY r.id LIMIT 64`, cursor, now.Unix())
-	if err != nil {
-		return cursor, err
-	}
-	type candidate struct{ rule, group, interval int64 }
-	pending := make([]candidate, 0, 64)
-	for rows.Next() {
-		var item candidate
-		if err := rows.Scan(&item.rule, &item.group, &item.interval); err != nil {
-			rows.Close()
-			return cursor, err
-		}
-		pending = append(pending, item)
-	}
-	rows.Close()
-	if err := rows.Err(); err != nil {
-		return cursor, err
-	}
-	if len(pending) == 0 {
-		return 0, nil
-	}
-
-	used := make(map[int64]bool)
-	count := 0
-	for _, item := range pending {
-		cursor = item.rule
-		if inFlight[item.rule] {
-			continue
-		}
-		devices := nodes[item.group]
-		if len(devices) == 0 {
-			continue
-		}
-		s.configMu.RLock()
-		config := s.configs[item.group].value
-		s.configMu.RUnlock()
-		if config.Revision == "" {
-			continue
-		}
-		if _, compiled := slices.BinarySearchFunc(config.Rules, item.rule, func(f wire.Forward, id int64) int {
-			return cmp.Compare(f.ID, id)
-		}); !compiled {
-			continue
-		}
-		var node wire.Device
-		bucket := now.Unix() / item.interval
-		for i := range devices {
-			device := devices[(int(bucket%int64(len(devices)))+i)%len(devices)]
-			if !used[device.ID] && device.Revision == config.Revision {
-				node = device
-				break
-			}
-		}
-		if node.ID == 0 {
-			continue
-		}
-		used[node.ID] = true
-		task := wire.DiagnosticTask{ID: token(), RuleID: item.rule, Revision: config.Revision, ProbeSamples: 1, ProbeOffset: bucket}
-		go func() {
-			result, status := s.waitNodeCheck(ctx, node.ID, task, true)
-			if status == http.StatusOK {
-				s.saveRuleProbe(ctx, task.RuleID, boundedProbeLinks(result.Links, task.ProbeSamples))
-			}
-		}()
-		count++
-		if count == free {
-			break
-		}
-	}
-	return cursor, nil
-}
-
 type probeStats struct {
 	Attempts int   `json:"attempts"`
 	Failed   int   `json:"failed"`
@@ -219,6 +65,25 @@ func (s *probeStats) add(status string, latency int64) {
 type probeHistoryPoint struct {
 	At int64 `json:"at"`
 	probeStats
+	probePeriod
+}
+
+type probePeriod struct {
+	Expected int    `json:"expected"`
+	Recorded int    `json:"recorded"`
+	Status   string `json:"status"`
+}
+
+func (p *probePeriod) add(status string) {
+	p.Expected++
+	if status == "sampled" {
+		p.Recorded++
+	}
+	if p.Status == "" {
+		p.Status = status
+	} else if p.Status != status {
+		p.Status = "mixed"
+	}
 }
 
 type probeHistorySegment struct {
@@ -240,12 +105,13 @@ type probeHistoryLane struct {
 
 func (s *Server) ruleProbeHistory(w http.ResponseWriter, r *http.Request, u User) {
 	id := pathID(r)
-	var entry, interval, latest int64
+	var entry, interval int64
 	var serviceBlock string
-	var routeReady bool
+	var routeReady, enabled, sharedTLS bool
 	err := s.db.QueryRowContext(r.Context(), `SELECT r.entry,`+ruleProbeIntervalSQL+`,`+ruleServiceBlockSQL+`,`+ruleRouteReadySQL+`,
-		coalesce((SELECT max(sampled) FROM rule_probe_samples WHERE rule=r.id AND sampled>=unixepoch()-604800),0)
-		FROM rules r JOIN users u ON u.id=r.owner WHERE r.id=? AND (r.owner=? OR ?)`, id, u.ID, u.Admin).Scan(&entry, &interval, &serviceBlock, &routeReady, &latest)
+		coalesce(json_extract(r.json,'$.enabled'),0),coalesce(json_extract(r.json,'$.tlsShared'),0)
+		FROM rules r JOIN users u ON u.id=r.owner WHERE r.id=? AND (r.owner=? OR ?)`, id, u.ID, u.Admin).
+		Scan(&entry, &interval, &serviceBlock, &routeReady, &enabled, &sharedTLS)
 	if errors.Is(err, sql.ErrNoRows) {
 		fail(w, 404, "规则不存在")
 		return
@@ -280,27 +146,77 @@ func (s *Server) ruleProbeHistory(w http.ResponseWriter, r *http.Request, u User
 		fail(w, 400, "无效的历史时间范围")
 		return
 	}
-	end := time.Now().Unix()
+	now := time.Now().Unix()
+	end := now / interval * interval
 	start := end - duration
-	rows, err := s.db.QueryContext(r.Context(), `SELECT sampled,links FROM rule_probe_samples
-		WHERE rule=? AND sampled>=? ORDER BY sampled`, id, start)
+	rows, err := s.db.QueryContext(r.Context(), `SELECT at,interval,sampled,status,evidence,coalesce(links,'') FROM rule_probe_slots
+		WHERE rule=? AND at>=? AND at<=? AND at+interval>?
+		UNION ALL SELECT sampled,0,sampled,'sampled','',links FROM rule_probe_samples
+		WHERE rule=? AND sampled>=? AND sampled<=?`, id, start-300, now, start, id, start, now)
 	if err != nil {
 		dbFailure(w, err)
 		return
 	}
 	defer rows.Close()
 	type storedSample struct {
-		at    int64
-		links string
+		at, interval, sampled   int64
+		status, evidence, links string
 	}
 	var samples []storedSample
 	for rows.Next() {
 		var sample storedSample
-		if err = rows.Scan(&sample.at, &sample.links); err != nil {
+		if err = rows.Scan(&sample.at, &sample.interval, &sample.sampled, &sample.status, &sample.evidence, &sample.links); err != nil {
 			dbFailure(w, err)
 			return
 		}
+		if sample.status == "pending" {
+			switch {
+			case sample.at+sample.interval+16 <= now:
+				sample.status = firstNonempty(sample.evidence, "unreported")
+			case sample.at+sample.interval <= now:
+				sample.status = "awaiting"
+			}
+		}
 		samples = append(samples, sample)
+	}
+	bucketAt := func(at int64) int64 { return start + (at-start)/resolution*resolution }
+	periods := make(map[int64]probePeriod, duration/resolution)
+	known := make(map[int64]bool)
+	legacy := make(map[int64]bool)
+	expected, recorded := 0, 0
+	addPeriod := func(at int64, status string) {
+		expected++
+		if status == "sampled" {
+			recorded++
+		}
+		bucket := bucketAt(at)
+		period := periods[bucket]
+		period.add(status)
+		periods[bucket] = period
+	}
+	current := "pending"
+	var latest int64
+	for _, sample := range samples {
+		if sample.interval == 0 {
+			continue
+		}
+		latest = max(latest, sample.sampled)
+		if sample.at == end && sample.interval == interval {
+			current = sample.status
+		}
+		for at := max(start, sample.at); at < min(end, sample.at+sample.interval); at += 60 {
+			known[at] = true
+		}
+		if sample.at >= start && sample.at+sample.interval <= end {
+			addPeriod(sample.at, sample.status)
+		}
+	}
+	if current == "pending" {
+		if !enabled {
+			current = "paused"
+		} else if sharedTLS {
+			current = "unsupported"
+		}
 	}
 	if err := rows.Err(); err != nil {
 		dbFailure(w, err)
@@ -322,16 +238,32 @@ func (s *Server) ruleProbeHistory(w http.ResponseWriter, r *http.Request, u User
 		segments map[segmentKey]*segmentHistory
 	}
 	lanes := make(map[[2]string]*history)
-	coverage := make(map[int64]bool)
-	firstCompleteBucket := (start + interval - 1) / interval
 	for _, sample := range samples {
+		if sample.interval == 0 {
+			// Imported history only has a receipt time. Keep it unless a fixed
+			// slot already accounts for that part of the timeline.
+			if known[sample.at/60*60] {
+				continue
+			}
+			latest = max(latest, sample.sampled)
+			if sample.at >= end {
+				if current == "pending" {
+					current = "sampled"
+				}
+				continue
+			}
+			at := sample.at / interval * interval
+			if !legacy[at] {
+				addPeriod(at, "sampled")
+				legacy[at] = true
+			}
+		} else if sample.at < start || sample.at+sample.interval > end || sample.links == "" {
+			continue
+		}
 		var links []wire.LinkProbe
 		if err = json.Unmarshal([]byte(sample.links), &links); err != nil {
 			dbFailure(w, err)
 			return
-		}
-		if bucket := sample.at / interval; bucket >= firstCompleteBucket && bucket < end/interval {
-			coverage[bucket] = true
 		}
 		for _, link := range links {
 			key := [2]string{link.Network, link.Lane}
@@ -341,7 +273,7 @@ func (s *Server) ruleProbeHistory(w http.ResponseWriter, r *http.Request, u User
 					points: make(map[int64]*probeStats), segments: make(map[segmentKey]*segmentHistory)}
 				lanes[key] = lane
 			}
-			bucket := sample.at - sample.at%resolution
+			bucket := bucketAt(sample.at)
 			point := lane.points[bucket]
 			if point == nil {
 				point = &probeStats{}
@@ -392,11 +324,27 @@ func (s *Server) ruleProbeHistory(w http.ResponseWriter, r *http.Request, u User
 			}
 		}
 	}
+	for at := start; at < end; at += interval {
+		if legacy[at] {
+			continue
+		}
+		covered := false
+		for t := at; t < at+interval; t += 60 {
+			covered = covered || known[t]
+		}
+		if !covered {
+			addPeriod(at, "unreported")
+		}
+	}
 	result := make([]probeHistoryLane, 0, len(lanes))
 	series := func(points map[int64]*probeStats) []probeHistoryPoint {
-		values := make([]probeHistoryPoint, 0, duration/resolution+1)
-		for t := start - start%resolution; t <= end; t += resolution {
-			value := probeHistoryPoint{At: t}
+		values := make([]probeHistoryPoint, 0, duration/resolution)
+		for t := start; t < end; t += resolution {
+			period := periods[t]
+			if period.Expected == 0 {
+				period.Status = "other_cadence"
+			}
+			value := probeHistoryPoint{At: t, probePeriod: period}
 			if stats := points[t]; stats != nil {
 				value.probeStats = *stats
 			}
@@ -424,5 +372,6 @@ func (s *Server) ruleProbeHistory(w http.ResponseWriter, r *http.Request, u User
 		}
 	}
 	respond(w, 200, map[string]any{"lanes": result, "latest": latest, "start": start, "end": end, "interval": interval,
-		"sampledBuckets": len(coverage), "completeBuckets": max(0, end/interval-firstCompleteBucket)})
+		"points": series(nil), "current": map[string]any{"at": end, "status": current},
+		"sampledBuckets": recorded, "completeBuckets": expected})
 }

@@ -1319,7 +1319,6 @@ func (s *Server) syncNode(w http.ResponseWriter, r *http.Request) {
 	if applyMode && d.RelayAddress != "" {
 		out.RelayMode = firstNonempty(mode, "tls")
 	}
-	out.Diagnostic = s.pollDiagnostic(id, input.Diagnostic)
 	var e error
 	if d.ReverseID != "" {
 		out.Reverse, e = s.reverseEndpoints(group, d.ReverseID)
@@ -1421,6 +1420,21 @@ func (s *Server) syncNode(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	out.Release = s.nodeRelease(d, candidate, config.value, input.UpgradePending)
+	if e := s.receiveRuleProbe(r.Context(), id, credentialHash, input.Diagnostic, time.Now()); e != nil {
+		dbFailure(w, e)
+		return
+	}
+	out.Diagnostic = s.pollDiagnostic(id, input.Diagnostic)
+	if out.Diagnostic != nil {
+		offer, err := s.offerRuleProbe(r.Context(), id, credentialHash, out.Diagnostic.ID)
+		if err != nil {
+			dbFailure(w, err)
+			return
+		}
+		if !offer {
+			out.Diagnostic = nil
+		}
+	}
 	respond(w, 200, out)
 }
 

@@ -130,7 +130,9 @@ func TestRuleSubscriptionLifecycle(t *testing.T) {
 	}
 	links := []wire.LinkProbe{{Network: "tcp", Lane: "primary", MeasuresTarget: true,
 		Traces: []wire.RouteTrace{{Steps: []wire.ProbeStep{{Status: "ok", LatencyMS: 4}}}}}}
-	panel.saveRuleProbe(context.Background(), saved.ID, links)
+	if err := panel.saveManualRuleProbe(context.Background(), probeKey(saved.ID, 300, time.Now().Add(-5*time.Minute)), entry.ID, links); err != nil {
+		t.Fatal(err)
+	}
 
 	for _, state := range []struct {
 		name, reason string
@@ -188,16 +190,18 @@ func TestRuleSubscriptionLifecycle(t *testing.T) {
 				t.Fatalf("inactive subscription left a forward published: %+v, %v", after, err)
 			}
 
-			if _, err = panel.db.Exec("UPDATE rule_probe_samples SET sampled=unixepoch()-600 WHERE rule=?", saved.ID); err != nil {
+			now := time.Now()
+			if err := panel.planRuleProbes(context.Background(), now); err != nil {
 				t.Fatal(err)
 			}
-			cursor, err := panel.probeRuleBatch(context.Background(), 0)
-			if err != nil || cursor != 0 {
-				t.Fatalf("ineligible rule reached probe scheduler: cursor %d, %v", cursor, err)
+			if err := panel.probeRuleBatch(context.Background(), now, now.Unix()); err != nil {
+				t.Fatal(err)
 			}
-			panel.saveRuleProbe(context.Background(), saved.ID, links)
+			if err := panel.saveManualRuleProbe(context.Background(), probeKey(saved.ID, 300, now.Add(time.Hour)), entry.ID, links); err != nil {
+				t.Fatal(err)
+			}
 			var samples int
-			if err = panel.db.QueryRow("SELECT count(*) FROM rule_probe_samples WHERE rule=?", saved.ID).Scan(&samples); err != nil || samples != 1 {
+			if err = panel.db.QueryRow("SELECT count(*) FROM rule_probe_slots WHERE rule=?", saved.ID).Scan(&samples); err != nil || samples != 1 {
 				t.Fatalf("sample count while paused = %d, %v", samples, err)
 			}
 

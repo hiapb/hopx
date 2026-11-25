@@ -1810,6 +1810,8 @@ button.diagnostic-entry-choice:hover { border-color: var(--accent); }
 .diagnostic-segment small { display: inline-block; margin-inline-start: 6px; }
 .diagnostic-segment[aria-pressed="true"], .diagnostic-segment:hover { background: var(--subtle); border-color: var(--line); }
 .diagnostic-caption { margin-top: 9px; line-height: 1.5; }
+.diagnostic-current { display: flex; align-items: center; flex-wrap: wrap; gap: 4px 7px; width: fit-content; margin: 7px 0 9px; padding: 4px 8px; border-radius: 7px; background: var(--subtle); color: var(--muted); font-size: 11px; font-variant-numeric: tabular-nums; }
+.diagnostic-current .diagnostic-tag { margin: 0; }
 @media (max-width: 480px) {
   .diagnostic-heading { flex-wrap: wrap; gap: 9px; padding: 12px; }
   .diagnostic-toolbar .ant-segmented { width: 100%; }

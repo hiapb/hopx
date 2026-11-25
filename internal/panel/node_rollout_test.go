@@ -65,15 +65,12 @@ func TestRolloutWaitsForCandidateConfiguration(t *testing.T) {
 }
 
 func TestManualDiagnosticReplacesBackgroundProbe(t *testing.T) {
-	server := &Server{diagnostics: make(map[int64]probeCheck)}
+	server := &Server{diagnostics: map[int64]probeCheck{1: {
+		task: wire.DiagnosticTask{ID: "periodic"}, expires: time.Now().Add(probeLease), background: true, ready: true,
+	}}}
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 	defer cancel()
-	background := make(chan int, 1)
 	manual := make(chan int, 1)
-	go func() {
-		_, code := server.waitNodeCheck(ctx, 1, wire.DiagnosticTask{ID: "periodic"}, true)
-		background <- code
-	}()
 	waitForTask := func(id string) {
 		t.Helper()
 		for ctx.Err() == nil {
@@ -95,8 +92,5 @@ func TestManualDiagnosticReplacesBackgroundProbe(t *testing.T) {
 	server.pollDiagnostic(1, &wire.DiagnosticResult{ID: "manual"})
 	if got := <-manual; got != http.StatusOK {
 		t.Fatalf("manual probe status = %d", got)
-	}
-	if got := <-background; got != http.StatusTooManyRequests {
-		t.Fatalf("displaced background probe status = %d", got)
 	}
 }

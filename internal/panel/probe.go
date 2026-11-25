@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"log/slog"
 	"net/http"
 	"net/netip"
 	"slices"
@@ -98,6 +99,8 @@ type probeCheck struct {
 	expires    time.Time
 	done       chan struct{}
 	background bool
+	ready      bool
+	offered    bool
 }
 
 func (s *Server) pollDiagnostic(id int64, result *wire.DiagnosticResult) *wire.DiagnosticTask {
@@ -110,6 +113,16 @@ func (s *Server) pollDiagnostic(id int64, result *wire.DiagnosticResult) *wire.D
 	if time.Now().After(check.expires) {
 		delete(s.diagnostics, id)
 		return nil
+	}
+	if check.background {
+		if !check.ready {
+			return nil
+		}
+		if result != nil && result.ID == check.task.ID {
+			delete(s.diagnostics, id)
+			return nil
+		}
+		return &check.task
 	}
 	if check.result == nil && result != nil && result.ID == check.task.ID {
 		check.result = result
@@ -265,10 +278,10 @@ func (s *Server) diagnoseRule(w http.ResponseWriter, r *http.Request, u User) {
 	id := pathID(r)
 	var rule wire.Rule
 	var raw, serviceBlock string
-	var entryID, ownerID int64
-	err := s.db.QueryRowContext(r.Context(), `SELECT r.entry,r.owner,r.json,`+ruleServiceBlockSQL+`
+	var entryID, ownerID, interval int64
+	err := s.db.QueryRowContext(r.Context(), `SELECT r.entry,r.owner,r.json,`+ruleServiceBlockSQL+`,`+ruleProbeIntervalSQL+`
 		FROM rules r JOIN users u ON u.id=r.owner WHERE r.id=? AND (r.owner=? OR ?)`,
-		id, u.ID, u.Admin).Scan(&entryID, &ownerID, &raw, &serviceBlock)
+		id, u.ID, u.Admin).Scan(&entryID, &ownerID, &raw, &serviceBlock, &interval)
 	if errors.Is(err, sql.ErrNoRows) {
 		fail(w, 404, "规则不存在")
 		return
@@ -342,7 +355,7 @@ func (s *Server) diagnoseRule(w http.ResponseWriter, r *http.Request, u User) {
 		}
 		if out.Status == "running" && !statusOnly && (!query.Has("node") || selected == number) {
 			checks.Go(func() {
-				s.diagnoseEntry(r.Context(), device, detailed, id, config.Revision, out)
+				s.diagnoseEntry(r.Context(), device, detailed, id, interval, config.Revision, out)
 			})
 		}
 	}
@@ -375,10 +388,11 @@ func entryStatus(device wire.Device, enabled, compiled bool, revision string) st
 	}
 }
 
-func (s *Server) diagnoseEntry(ctx context.Context, device wire.Device, detailed bool, ruleID int64, revision string, out *entryDiagnostic) {
+func (s *Server) diagnoseEntry(ctx context.Context, device wire.Device, detailed bool, ruleID, interval int64, revision string, out *entryDiagnostic) {
+	now := time.Now()
 	task := wire.DiagnosticTask{ID: token(), RuleID: ruleID, Revision: revision}
 	if detailed && device.AcceptLinkProbe {
-		task.ProbeSamples, task.ProbeOffset = 1, time.Now().Unix()
+		task.ProbeSamples, task.ProbeOffset = 1, now.Unix()
 	}
 	result, status := s.waitDiagnostic(ctx, device.ID, task)
 	switch status {
@@ -386,8 +400,10 @@ func (s *Server) diagnoseEntry(ctx context.Context, device wire.Device, detailed
 		out.Status, out.Primary, out.Backup = result.RuleStatus, result.PrimaryRoute, result.BackupRoute
 		out.RecentRoutes = result.RecentRoutes
 		out.Links = boundedProbeLinks(result.Links, task.ProbeSamples)
-		if task.ProbeSamples > 0 {
-			s.saveRuleProbe(ctx, ruleID, out.Links)
+		if task.ProbeSamples > 0 && result.RuleStatus == "running" {
+			if err := s.saveManualRuleProbe(ctx, probeKey(ruleID, interval, now), device.GroupID, out.Links); err != nil && ctx.Err() == nil {
+				slog.Warn("save manual rule probe", "rule", ruleID, "error", err)
+			}
 		}
 	case http.StatusTooManyRequests:
 		out.Status = "busy"
@@ -458,37 +474,27 @@ func (s *Server) runDiagnostic(w http.ResponseWriter, r *http.Request, nodeID in
 }
 
 func (s *Server) waitDiagnostic(ctx context.Context, nodeID int64, task wire.DiagnosticTask) (wire.DiagnosticResult, int) {
-	return s.waitNodeCheck(ctx, nodeID, task, false)
-}
-
-func (s *Server) waitNodeCheck(ctx context.Context, nodeID int64, task wire.DiagnosticTask, background bool) (wire.DiagnosticResult, int) {
 	now := time.Now()
 	s.mu.Lock()
 	existing, exists := s.diagnostics[nodeID]
 	if exists && existing.expires.After(now) {
-		if background || !existing.background {
+		if !existing.background {
 			s.mu.Unlock()
 			return wire.DiagnosticResult{}, http.StatusTooManyRequests
 		}
-		if existing.result == nil {
-			close(existing.done)
-		}
 		delete(s.diagnostics, nodeID)
 	}
-	backgroundCount := 0
 	for id, diagnostic := range s.diagnostics {
 		if !diagnostic.expires.After(now) {
 			delete(s.diagnostics, id)
-		} else if diagnostic.background {
-			backgroundCount++
 		}
 	}
-	if len(s.diagnostics) >= 32 || (background && backgroundCount >= maxBackgroundChecks) {
+	if len(s.diagnostics) >= 32 {
 		s.mu.Unlock()
 		return wire.DiagnosticResult{}, http.StatusTooManyRequests
 	}
 	done := make(chan struct{})
-	s.diagnostics[nodeID] = probeCheck{task: task, expires: now.Add(15 * time.Second), done: done, background: background}
+	s.diagnostics[nodeID] = probeCheck{task: task, expires: now.Add(probeLease), done: done}
 	s.mu.Unlock()
 	defer func() {
 		s.mu.Lock()

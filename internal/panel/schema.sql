@@ -111,6 +111,27 @@ CREATE INDEX IF NOT EXISTS rule_probe_sampled ON rule_probe_samples(sampled);
 CREATE INDEX IF NOT EXISTS rule_probe_history ON rule_probe_samples(rule,sampled);
 CREATE INDEX IF NOT EXISTS rule_probe_enabled ON rules(id)
  WHERE json_extract(json,'$.enabled')=1 AND coalesce(json_extract(json,'$.tlsShared'),0)=0;
+CREATE TABLE IF NOT EXISTS rule_probe_slots (
+ rule INTEGER NOT NULL REFERENCES rules(id) ON DELETE CASCADE,
+ interval INTEGER NOT NULL CHECK(interval IN (60,300)),
+ at INTEGER NOT NULL, entry INTEGER NOT NULL,
+ due INTEGER NOT NULL, deadline INTEGER GENERATED ALWAYS AS (at+interval+16) VIRTUAL,
+ tries INTEGER NOT NULL DEFAULT 0, last_node INTEGER NOT NULL DEFAULT 0,
+ status TEXT NOT NULL DEFAULT 'pending', evidence TEXT NOT NULL DEFAULT '',
+ sampled INTEGER NOT NULL DEFAULT 0, links TEXT,
+ PRIMARY KEY(rule,at,interval)
+) WITHOUT ROWID;
+CREATE INDEX IF NOT EXISTS rule_probe_slots_at ON rule_probe_slots(at);
+CREATE INDEX IF NOT EXISTS rule_probe_slots_due ON rule_probe_slots(entry,due) WHERE status='pending';
+CREATE INDEX IF NOT EXISTS rule_probe_slots_deadline ON rule_probe_slots(deadline) WHERE status='pending';
+CREATE TABLE IF NOT EXISTS rule_probe_attempts (
+ id TEXT PRIMARY KEY, node INTEGER NOT NULL REFERENCES devices(id) ON DELETE CASCADE,
+ rule INTEGER NOT NULL, at INTEGER NOT NULL, interval INTEGER NOT NULL, ordinal INTEGER NOT NULL,
+ offered INTEGER NOT NULL DEFAULT 0, returned INTEGER NOT NULL DEFAULT 0,
+ FOREIGN KEY(rule,at,interval) REFERENCES rule_probe_slots(rule,at,interval) ON DELETE CASCADE
+) WITHOUT ROWID;
+CREATE INDEX IF NOT EXISTS rule_probe_attempts_slot ON rule_probe_attempts(rule,at,interval);
+CREATE INDEX IF NOT EXISTS rule_probe_attempts_node ON rule_probe_attempts(node);
 CREATE TABLE IF NOT EXISTS telegram_links (
  user_id INTEGER PRIMARY KEY REFERENCES users(id) ON DELETE CASCADE, chat_id INTEGER NOT NULL UNIQUE, enabled INTEGER NOT NULL DEFAULT 1,
  income INTEGER NOT NULL DEFAULT 0, updown INTEGER NOT NULL DEFAULT 0

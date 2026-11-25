@@ -820,7 +820,8 @@ func (s *Server) Maintenance(ctx context.Context) {
 			s.renew()
 			s.queueTelegramDeviceStatus()
 			s.pruneDeviceSessions()
-			if _, err := s.db.ExecContext(ctx, "DELETE FROM rule_probe_samples WHERE sampled < unixepoch()-604800"); err != nil && ctx.Err() == nil {
+			if _, err := s.db.ExecContext(ctx, `DELETE FROM rule_probe_samples WHERE sampled < unixepoch()-604800;
+				DELETE FROM rule_probe_slots WHERE at<=unixepoch()-604800 AND at+interval<=unixepoch()-604800`); err != nil && ctx.Err() == nil {
 				slog.Error("expire rule probe history", "error", err)
 			}
 			s.deliverTelegram(ctx)
