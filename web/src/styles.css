@@ -526,6 +526,8 @@ button:focus-visible, a:focus-visible { outline: 2px solid var(--accent); outlin
 .probe-resources { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 8px; margin: 0; }
 .probe-resources dd { margin: 0; }
 .probe-meter { position: relative; isolation: isolate; display: block; padding: 3px 6px; color: var(--text); font-size: 14px; font-weight: 650; font-variant-numeric: tabular-nums; white-space: nowrap; }
+button.probe-meter { width: 100%; border: 0; border-radius: 4px; background: none; text-align: start; cursor: pointer; }
+.probe-resource-tooltip { display: grid; gap: 2px; overflow-wrap: anywhere; }
 .probe-track { position: absolute; z-index: -1; inset: 0; overflow: hidden; border-radius: 4px; background: var(--subtle); }
 .probe-track i { display: block; height: 100%; border-radius: inherit; background: var(--probe-fill, color-mix(in srgb, var(--online) 30%, transparent)); }
 .probe-meter[data-level="elevated"] { --probe-fill: color-mix(in srgb, var(--warning) 36%, transparent); }

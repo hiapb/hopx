@@ -142,6 +142,8 @@ export type NodeBandwidth = {
   hasTotals?: boolean;
 };
 
+type ResourceBytes = { used: number; total: number };
+
 export type Node = {
   countryCode?: string;
   acceptHAProxy?: boolean;
@@ -171,6 +173,9 @@ export type Node = {
     cpu: number;
     ram: number;
     disk: number;
+    cpuDetails?: { model?: string; logicalCPUs?: number; loadAverage?: string; processes?: number };
+    memoryBytes?: ResourceBytes;
+    diskBytes?: ResourceBytes;
     uptime: number;
     listeners: number;
     connections: number;

@@ -36,24 +36,46 @@ const trafficDirections = [
 ] as const;
 type TrafficDirection = (typeof trafficDirections)[number];
 
-function ResourceMeter({ node, metric }: { node: Node; metric: (typeof resources)[number][0] }) {
-  const percent = Math.max(0, Math.min(100, Math.round(node.metrics[metric] || 0)));
+function ResourceMeter({ node, metric, label, narrow }: {
+  node: Node;
+  metric: (typeof resources)[number][0];
+  label: string;
+  narrow: boolean;
+}) {
+  const { metrics } = node;
+  const percent = Math.max(0, Math.min(100, Math.round(metrics[metric] || 0)));
   const level = !node.online ? "offline" :
     percent >= 90 ? "critical" :
     percent >= 80 ? "high" :
     percent >= 60 ? "elevated" : "normal";
-  return <span className="probe-meter" data-level={level}>
-    <span aria-hidden="true" className="probe-track">
-      {node.online && <i style={{ width: percent + "%" }} />}
-    </span>
-    <span>{node.online ? percent + "%" : "—"}</span>
+  if (!node.online) return <span className="probe-meter" data-level={level}>
+    <span aria-hidden="true" className="probe-track" />
+    —
   </span>;
+
+  const cpu = metric === "cpu" ? metrics.cpuDetails : undefined;
+  const capacity = metric === "ram" ? metrics.memoryBytes : metric === "disk" ? metrics.diskBytes : undefined;
+  return <DismissibleTooltip clickToOpen={narrow} title={<div className="probe-resource-tooltip">
+    <strong>{label} · {percent}%</strong>
+    {cpu?.model && <div>{cpu.model}</div>}
+    {!!cpu?.logicalCPUs && <div>逻辑核心 {cpu.logicalCPUs}</div>}
+    {cpu?.loadAverage && <div>平均负载 {cpu.loadAverage}</div>}
+    {!!cpu?.processes && <div>进程数 {cpu.processes}</div>}
+    {!!capacity?.total && <div>已用 / 总量 {bytes(capacity.used)} / {bytes(capacity.total)}</div>}
+  </div>}>
+    <button type="button" className="probe-meter" data-level={level} aria-label={`${label}占用 ${percent}%`}>
+      <span aria-hidden="true" className="probe-track">
+        <i style={{ width: percent + "%" }} />
+      </span>
+      {percent}%
+    </button>
+  </DismissibleTooltip>;
 }
 
-function ResourceUsage({ node }: { node: Node }) {
+function ResourceUsage({ node, narrow }: { node: Node; narrow: boolean }) {
   return <dl className="probe-resources">
     {resources.map(([key, label]) => <div key={key}>
-      <dt>{label}</dt><dd><ResourceMeter node={node} metric={key} /></dd>
+      <dt>{label}</dt><dd><ResourceMeter node={node} metric={key} label={label} narrow={narrow} /></dd>
     </div>)}
   </dl>;
 }
@@ -568,10 +590,21 @@ export default function Nodes({ user, lookingGlass, showExitIP }: { user: User; 
     ...(!narrow || mobile ? [
       ...resources.map(([metric, label]) => ({
         title: label,
-        key: metric,
+        key: `${metric}-${narrow ? "mobile" : "desktop"}`,
         width: mobile ? 68 : screens.xl ? "8%" : "6%",
-        shouldCellUpdate: (node: Node, previous: Node) => node.online !== previous.online || node.metrics[metric] !== previous.metrics[metric],
-        render: (_: unknown, node: Node) => <ResourceMeter node={node} metric={metric} />,
+        shouldCellUpdate: (node: Node, previous: Node) => {
+          if (node.online !== previous.online || node.metrics[metric] !== previous.metrics[metric]) return true;
+          if (metric === "cpu") {
+            const current = node.metrics.cpuDetails;
+            const old = previous.metrics.cpuDetails;
+            return current?.model !== old?.model || current?.logicalCPUs !== old?.logicalCPUs ||
+              current?.loadAverage !== old?.loadAverage || current?.processes !== old?.processes;
+          }
+          const field = metric === "ram" ? "memoryBytes" : "diskBytes";
+          return node.metrics[field]?.used !== previous.metrics[field]?.used ||
+            node.metrics[field]?.total !== previous.metrics[field]?.total;
+        },
+        render: (_: unknown, node: Node) => <ResourceMeter node={node} metric={metric} label={label} narrow={narrow} />,
       })),
       {
         title: "运行时长",
@@ -730,7 +763,7 @@ export default function Nodes({ user, lookingGlass, showExitIP }: { user: User; 
         {diagBusy && <div className="alert-gap">正在读取诊断</div>}
         {active && (
           <div className="details-grid probe-detail-grid">
-            <div className="probe-detail-resources"><ResourceUsage node={active} /></div>
+            <div className="probe-detail-resources"><ResourceUsage node={active} narrow={narrow} /></div>
             <div className="probe-detail-bandwidth">
               <TrafficRates bandwidth={active.metrics} online={active.online} />
             </div>

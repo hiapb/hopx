@@ -5,6 +5,7 @@ import (
 	"context"
 	"net/http"
 	"os"
+	"runtime"
 	"strconv"
 	"strings"
 	"time"
@@ -41,8 +42,58 @@ func reportBandwidth(ctx context.Context, client *http.Client, panel, iface stri
 
 type sampler struct {
 	cpuTotal, cpuIdle uint64
+	cpu               wire.CPUDetails
+	cpuDetailsRefresh time.Time
 	network           networkSampler
 	proc              procReader
+}
+
+func (s *sampler) cpuDetails() wire.CPUDetails {
+	if s.cpu.LogicalCPUs == 0 {
+		s.cpu.LogicalCPUs = runtime.NumCPU()
+		s.proc.lines("/proc/cpuinfo", func(f []string) bool {
+			if len(f) > 3 && f[0] == "model" && f[1] == "name" && f[2] == ":" {
+				s.cpu.Model = strings.Join(f[3:], " ")
+				return true
+			}
+			if len(f) > 2 && f[0] == "Hardware" && f[1] == ":" {
+				s.cpu.Model = strings.Join(f[2:], " ")
+			}
+			return false
+		})
+	}
+	if now := time.Now(); !now.Before(s.cpuDetailsRefresh) {
+		s.cpuDetailsRefresh = now.Add(30 * time.Second)
+		s.cpu.LoadAverage = ""
+		s.proc.lines("/proc/loadavg", func(f []string) bool {
+			if len(f) >= 3 {
+				s.cpu.LoadAverage = strings.Join(f[:3], " / ")
+			}
+			return true
+		})
+		s.cpu.Processes = processCount()
+	}
+	return s.cpu
+}
+
+func processCount() int {
+	proc, err := os.Open("/proc")
+	if err != nil {
+		return 0
+	}
+	defer proc.Close()
+	count := 0
+	for {
+		names, err := proc.Readdirnames(128)
+		for _, name := range names {
+			if number(name) > 0 {
+				count++
+			}
+		}
+		if err != nil {
+			return count
+		}
+	}
 }
 
 type networkSampler struct {
@@ -121,8 +172,9 @@ func (s *sampler) sample(dir string) wire.Metrics {
 		}
 		return mem > 0 && hasAvailable
 	})
-	if mem > 0 && free <= mem {
+	if mem > 0 && hasAvailable && free <= mem {
 		m.RAM = 100 * float64(mem-free) / float64(mem)
+		m.MemoryBytes = wire.ResourceBytes{Used: (mem - free) * 1024, Total: mem * 1024}
 	}
 	s.proc.lines("/proc/self/status", func(f []string) bool {
 		if len(f) > 1 && f[0] == "VmRSS:" {
@@ -137,7 +189,11 @@ func (s *sampler) sample(dir string) wire.Metrics {
 		m.Uptime = int64(seconds)
 	}
 	m.Bandwidth = s.network.sample()
-	m.Disk = diskUsage(dir)
+	m.CPUDetails = s.cpuDetails()
+	m.DiskBytes = diskUsage(dir)
+	if m.DiskBytes.Total > 0 {
+		m.Disk = 100 * float64(m.DiskBytes.Used) / float64(m.DiskBytes.Total)
+	}
 	return m
 }
 

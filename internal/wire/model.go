@@ -252,22 +252,37 @@ type Bandwidth struct {
 
 type Metrics struct {
 	Bandwidth
-	FileDescriptors  int     `json:"fileDescriptors,omitempty"`
-	FileLimit        uint64  `json:"fileLimit,omitempty"`
-	BindAddresses    int     `json:"bindAddresses,omitempty"`
-	UDPBindAddresses int     `json:"udpBindAddresses,omitempty"`
-	UDPDrop          int64   `json:"udpDrop"`
-	ListenerLimit    int     `json:"listenerLimit"`
-	ConnectionLimit  int     `json:"connectionLimit"`
-	TCPConnections   int64   `json:"tcpConnections"`
-	UDPSessions      int64   `json:"udpSessions"`
-	CPU              float64 `json:"cpu"`
-	RAM              float64 `json:"ram"`
-	Disk             float64 `json:"disk"`
-	Uptime           int64   `json:"uptime"`
-	Connections      int64   `json:"connections"`
-	Listeners        int     `json:"listeners"`
-	RSS              int64   `json:"rss"`
+	CPUDetails       CPUDetails    `json:"cpuDetails,omitzero"`
+	MemoryBytes      ResourceBytes `json:"memoryBytes,omitzero"`
+	DiskBytes        ResourceBytes `json:"diskBytes,omitzero"`
+	FileDescriptors  int           `json:"fileDescriptors,omitempty"`
+	FileLimit        uint64        `json:"fileLimit,omitempty"`
+	BindAddresses    int           `json:"bindAddresses,omitempty"`
+	UDPBindAddresses int           `json:"udpBindAddresses,omitempty"`
+	UDPDrop          int64         `json:"udpDrop"`
+	ListenerLimit    int           `json:"listenerLimit"`
+	ConnectionLimit  int           `json:"connectionLimit"`
+	TCPConnections   int64         `json:"tcpConnections"`
+	UDPSessions      int64         `json:"udpSessions"`
+	CPU              float64       `json:"cpu"`
+	RAM              float64       `json:"ram"`
+	Disk             float64       `json:"disk"`
+	Uptime           int64         `json:"uptime"`
+	Connections      int64         `json:"connections"`
+	Listeners        int           `json:"listeners"`
+	RSS              int64         `json:"rss"`
+}
+
+type CPUDetails struct {
+	Model       string `json:"model,omitempty"`
+	LogicalCPUs int    `json:"logicalCPUs,omitempty"`
+	LoadAverage string `json:"loadAverage,omitempty"`
+	Processes   int    `json:"processes,omitempty"`
+}
+
+type ResourceBytes struct {
+	Used  uint64 `json:"used"`
+	Total uint64 `json:"total"`
 }
 
 type Heartbeat struct {
