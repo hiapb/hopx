@@ -60,9 +60,9 @@ RUN set -eu; mkdir /out; \
 FROM go-source AS node-build
 ARG HOPX_VERSION=dev
 COPY --from=haproxy-build /out/ /tmp/
-RUN cp /tmp/haproxy-amd64.gz internal/node/haproxy.gz \
+RUN --mount=type=cache,target=/root/.cache/go-build cp /tmp/haproxy-amd64.gz internal/node/haproxy.gz \
     && CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -tags bundledhaproxy -trimpath -ldflags="-s -w -X main.version=$HOPX_VERSION" -o /out/hopx-node-linux-amd64 ./cmd/hopx-node
-RUN cp /tmp/haproxy-arm64.gz internal/node/haproxy.gz \
+RUN --mount=type=cache,target=/root/.cache/go-build cp /tmp/haproxy-arm64.gz internal/node/haproxy.gz \
     && CGO_ENABLED=0 GOOS=linux GOARCH=arm64 go build -tags bundledhaproxy -trimpath -ldflags="-s -w -X main.version=$HOPX_VERSION" -o /out/hopx-node-linux-arm64 ./cmd/hopx-node
 
 FROM go-source AS release-verifiers

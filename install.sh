@@ -78,6 +78,10 @@ build_panel() {
   docker build -t "$1" --build-arg "HOPX_VERSION=$2" "$3"
 }
 
+build_node_artifacts() {
+  docker build --target node-artifacts --output "type=local,dest=$3" --build-arg "HOPX_VERSION=$2" "$1"
+}
+
 release_openssl() {
   local image=$1 directory=$2
   shift 2
@@ -102,7 +106,7 @@ make_release() (
   chmod 0755 "$workdir/releases" "$artifacts"
   if [[ -n $source ]]; then
     build_dir=$(mktemp -d)
-    docker build --target node-artifacts --output "type=local,dest=$build_dir" --build-arg "HOPX_VERSION=$version" "$source"
+    build_node_artifacts "$source" "$version" "$build_dir"
     install -m 0644 "$build_dir/haproxy-source.tar.gz" "$artifacts/haproxy-source.tar.gz"
   fi
   container=$(docker create "$image")
@@ -420,15 +424,9 @@ restore_archive() (
 )
 
 upgrade_service() (
-  local with_nodes=false
-  case "${1:-}" in
-    '') ;;
-    --with-nodes) with_nodes=true ;;
-    *) die '用法：upgrade [--with-nodes]' ;;
-  esac
-  (( $# <= 1 )) || die '用法：upgrade [--with-nodes]'
   instance
-  local source source_checkout source_tmp version image previous staged
+  local source source_checkout source_tmp version image previous staged node_version='' arch script
+  local publish_nodes=true
   version=$(get_version)
   image=$(image_label "$version")
   previous=$(getenv HOPX_IMAGE)
@@ -436,9 +434,29 @@ upgrade_service() (
   source_tmp=$(mktemp -d)
   trap 'rm -rf -- "$source_tmp"' EXIT
   load_source "$source_tmp"
+  if [[ -s $workdir/releases/install-amd64.txt && -s $workdir/releases/manifest.json ]]; then
+    IFS= read -r node_version < "$workdir/releases/install-amd64.txt"
+    [[ $node_version =~ ^[A-Za-z0-9._-]{1,64}$ ]] || die '当前节点发布版本格式无效'
+    if [[ -s $workdir/releases/$node_version/node-amd64 && -s $workdir/releases/$node_version/node-arm64 ]]; then
+      # Build with the published version so the embedded version string
+      # cannot turn a panel-only change into a node rollout.
+      say '正在检查节点程序是否有变化…'
+      build_node_artifacts "$source" "$node_version" "$source_tmp/node-check"
+      publish_nodes=false
+      for arch in amd64 arm64; do
+        [[ -s $source_tmp/node-check/hopx-node-linux-$arch ]] || die "未生成 $arch 节点程序，升级已停止"
+        if ! cmp -s "$source_tmp/node-check/hopx-node-linux-$arch" "$workdir/releases/$node_version/node-$arch"; then
+          publish_nodes=true
+        fi
+      done
+    fi
+  fi
+  if $publish_nodes && [[ $version == "$node_version" ]]; then
+    die '新版节点需要使用不同的发布版本，请更换 HOPX_VERSION 后重试'
+  fi
   backup_archive
   build_panel "$image" "$version" "$source"
-  if $with_nodes; then
+  if $publish_nodes; then
     staged="$workdir/releases/.manifest.next"
     make_release "$image" "$version" "$staged" "$source"
   fi
@@ -451,12 +469,16 @@ upgrade_service() (
   fi
   rm -f -- "$workdir/.env.previous"
   save_management_script
-  if $with_nodes; then
+  if $publish_nodes; then
     mv -- "$staged" "$workdir/releases/manifest.json"
     publish_bootstrap "$version"
     say '面板升级成功，新节点版本将自动按批发布。'
   else
-    say '面板升级成功，继续使用当前节点版本。'
+    for script in node-install.sh node-runner.sh; do
+      install -m 0644 -- "$source/scripts/$script" "$workdir/releases/.$script.next"
+      mv -- "$workdir/releases/.$script.next" "$workdir/releases/$script"
+    done
+    say '面板升级成功。节点程序未变化，继续使用当前版本。'
   fi
   access
 )
@@ -663,16 +685,7 @@ MENU
   read -r -p '请选择操作 [0-11]: ' choice || exit
   case "$choice" in
     1) (set -e; install_service) ;;
-    2)
-      say '1) 仅升级面板（默认）'
-      say '2) 升级面板并发布新节点版本'
-      read -r -p '请选择升级方式 [1/2]: ' choice || return
-      case "$choice" in
-        ''|1) (set -e; upgrade_service) ;;
-        2) (set -e; upgrade_service --with-nodes) ;;
-        *) say '无效选项。' ;;
-      esac
-      ;;
+    2) (set -e; upgrade_service) ;;
     3) (set -e; instance; compose stop) ;;
     4) (set -e; instance; compose up -d --wait --wait-timeout 100) ;;
     5) (set -e; backup_archive) ;;
@@ -689,7 +702,7 @@ MENU
 
 case "${1:-}" in
   install) install_service ;;
-  upgrade) shift; upgrade_service "$@" ;;
+  upgrade) upgrade_service ;;
   stop) instance; compose stop ;;
   restart) instance; compose up -d --wait --wait-timeout 100 ;;
   backup|run-backup) backup_archive ;;
@@ -700,5 +713,5 @@ case "${1:-}" in
   s3) remote_tool s3 ;;
   migrate) migrate_nyanpass ;;
   '') set +e; while true; do main_menu; read -r -p '按回车返回主菜单...' || exit 0; done ;;
-  *) die '可用命令: install | upgrade [--with-nodes] | stop | restart | backup | restore | cron | uninstall | run-backup | ftp | s3 | migrate' ;;
+  *) die '可用命令: install | upgrade | stop | restart | backup | restore | cron | uninstall | run-backup | ftp | s3 | migrate' ;;
 esac
