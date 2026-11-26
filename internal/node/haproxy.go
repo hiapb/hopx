@@ -36,6 +36,7 @@ type proxyProcess struct {
 	counters  map[int64]*counter
 	last      map[int64][2]int64
 	frontends map[int64]proxyFrontend
+	draining  bool
 	log       proxyTrafficLog
 }
 
@@ -188,37 +189,79 @@ func (p *proxyProcess) stop() {
 }
 
 func (p *proxyProcess) drain() {
-	_ = p.command.Process.Signal(syscall.SIGUSR1)
+	if p.draining || !p.running() {
+		return
+	}
+	commands := make([]string, 0, len(p.frontends))
+	for id := range p.frontends {
+		commands = append(commands, fmt.Sprintf("shutdown frontend hopx_%d", id))
+	}
+	if !p.runCommands(commands) {
+		_ = p.command.Process.Signal(syscall.SIGUSR1)
+		return
+	}
+	p.draining = true
+	// Keep the runtime socket open so individual rules can still be revoked.
+	// SIGUSR1 also closes that socket, so send it after the last session ends.
+	go func() {
+		tick := time.NewTicker(time.Second)
+		defer tick.Stop()
+		for {
+			ctx, cancel := context.WithTimeout(context.Background(), 250*time.Millisecond)
+			connections, err := p.info(ctx, "CurrConns:")
+			cancel()
+			if err == nil && connections == 0 {
+				_ = p.command.Process.Signal(syscall.SIGUSR1)
+				return
+			}
+			select {
+			case <-p.done:
+				return
+			case <-tick.C:
+			}
+		}
+	}()
 }
 
 func (p *proxyProcess) stopFrontends(shouldStop func(int64, proxyFrontend) bool) {
 	if !p.running() {
 		return
 	}
-	var commands strings.Builder
+	var commands []string
 	for id, frontend := range p.frontends {
 		if !shouldStop(id, frontend) {
 			continue
 		}
-		if commands.Len() >= 4000 {
-			if !p.runCommands(commands.String()) {
-				p.stop()
-				return
-			}
-			commands.Reset()
+		if !p.draining {
+			commands = append(commands, fmt.Sprintf("shutdown frontend hopx_%d", id))
 		}
 		for i := 1; i <= frontend.targets; i++ {
-			fmt.Fprintf(&commands, "shutdown sessions server hopx_%d/target_%d;", id, i)
+			server := fmt.Sprintf("hopx_backend_%d/target_%d", id, i)
+			commands = append(commands, "set server "+server+" state maint", "shutdown sessions server "+server)
 		}
-		fmt.Fprintf(&commands, "shutdown frontend hopx_%d;", id)
 		delete(p.frontends, id)
 	}
-	if commands.Len() != 0 && !p.runCommands(commands.String()) {
+	if !p.runCommands(commands) {
 		p.stop()
 	}
 }
 
-func (p *proxyProcess) runCommands(commands string) bool {
+func (p *proxyProcess) runCommands(commands []string) bool {
+	for len(commands) > 0 {
+		var batch strings.Builder
+		for len(commands) > 0 && batch.Len()+len(commands[0])+1 < 4000 {
+			batch.WriteString(commands[0])
+			batch.WriteByte(';')
+			commands = commands[1:]
+		}
+		if batch.Len() == 0 || !p.runCommandBatch(batch.String()) {
+			return false
+		}
+	}
+	return true
+}
+
+func (p *proxyProcess) runCommandBatch(commands string) bool {
 	conn, err := net.DialTimeout("unix", p.socket, 250*time.Millisecond)
 	if err != nil {
 		return false
@@ -346,11 +389,22 @@ func (p *proxyProcess) sample() (int, error) {
 }
 
 func (p *proxyProcess) checkReady(ctx context.Context) error {
+	pid, err := p.info(ctx, "Pid:")
+	if err != nil {
+		return err
+	}
+	if pid != p.command.Process.Pid {
+		return errors.New("unexpected HAProxy process on management socket")
+	}
+	return nil
+}
+
+func (p *proxyProcess) info(ctx context.Context, field string) (int, error) {
 	const probeTimeout = 250 * time.Millisecond
 	dialer := net.Dialer{Timeout: probeTimeout}
 	conn, err := dialer.DialContext(ctx, "unix", p.socket)
 	if err != nil {
-		return err
+		return 0, err
 	}
 	defer conn.Close()
 	deadline := time.Now().Add(probeTimeout)
@@ -359,25 +413,18 @@ func (p *proxyProcess) checkReady(ctx context.Context) error {
 	}
 	_ = conn.SetDeadline(deadline)
 	if _, err := io.WriteString(conn, "show info\n"); err != nil {
-		return err
+		return 0, err
 	}
 	info := bufio.NewScanner(io.LimitReader(conn, 16<<10))
-	ready := false
 	for info.Scan() {
-		if pid, ok := strings.CutPrefix(info.Text(), "Pid:"); ok {
-			if strings.TrimSpace(pid) != strconv.Itoa(p.command.Process.Pid) {
-				return errors.New("unexpected HAProxy process on management socket")
-			}
-			ready = true
+		if value, ok := strings.CutPrefix(info.Text(), field); ok {
+			return strconv.Atoi(strings.TrimSpace(value))
 		}
 	}
 	if err := info.Err(); err != nil {
-		return err
+		return 0, err
 	}
-	if ready {
-		return nil
-	}
-	return errors.New("HAProxy management socket returned no process ID")
+	return 0, fmt.Errorf("HAProxy management socket returned no field %s", field)
 }
 
 const proxySyncDNS = " init-addr last,libc,none"
@@ -411,7 +458,7 @@ func proxyConfig(rules []proxyRule, hosts []string, maxConnections int) (string,
 	fmt.Fprintf(&config, "    nbthread 1\n    maxconn %d\n    log stdout format raw local0\n\nresolvers hopx_dns\n    parse-resolv-conf\n\ndefaults\n    mode tcp\n    log global\n    log-format \"%%f %%U %%B\"\n    timeout connect 5s\n    timeout client 5m\n    timeout server 5m\n    option redispatch\n    retries 2\n", maxConnections)
 	fd := 3
 	for _, rule := range rules {
-		fmt.Fprintf(&config, "\nlisten hopx_%d\n", rule.ID)
+		fmt.Fprintf(&config, "\nfrontend hopx_%d\n", rule.ID)
 		if rule.HAProxyRatio > 0 {
 			fmt.Fprintf(&config, "    # traffic quota epoch %d\n", rule.QuotaEpoch)
 		}
@@ -426,6 +473,7 @@ func proxyConfig(rules []proxyRule, hosts []string, maxConnections int) (string,
 			fmt.Fprintf(&config, "    # %s\n    bind fd@%d\n", bind, fd)
 			fd++
 		}
+		fmt.Fprintf(&config, "    default_backend hopx_backend_%d\n\nbackend hopx_backend_%d\n", rule.ID, rule.ID)
 		balance := "roundrobin"
 		switch rule.Strategy {
 		case "random":

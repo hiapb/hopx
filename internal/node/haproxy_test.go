@@ -371,3 +371,72 @@ func TestHAProxyHandoffKeepsTCPAndUDP(t *testing.T) {
 		t.Fatalf("HAProxy reported %d B in and %d B out, want 3 B and 6 B", in, out)
 	}
 }
+
+func TestHAProxyDeleteDuringDrainKeepsSiblingConnections(t *testing.T) {
+	engine := NewEngine("127.0.0.1", 16, 64)
+	engine.proxy.binary, _ = exec.LookPath("haproxy")
+	engine.proxy.stateDir = t.TempDir()
+	if runtime.GOOS != "linux" || !engine.proxy.available() {
+		t.Skip("requires Linux with HAProxy available")
+	}
+	defer engine.Close()
+	target := tcpEcho(t, 'x')
+	newRule := func(id int64) (wire.Forward, string) {
+		address := freeTCP(t)
+		_, portText, _ := net.SplitHostPort(address)
+		port, _ := strconv.Atoi(portText)
+		return wire.Forward{HAProxy: true,
+			Rule: wire.Rule{ID: id, Enabled: true, Protocol: "tcp", Port: port, Targets: []string{target}}}, address
+	}
+	sibling, siblingAddress := newRule(1)
+	removed, removedAddress := newRule(2)
+	added, _ := newRule(3)
+	apply := func(revision string, rules ...wire.Forward) error {
+		return engine.Apply(context.Background(), wire.Config{Revision: revision, Rules: rules}, nil)
+	}
+	if err := apply("initial", sibling, removed); err != nil {
+		t.Fatal(err)
+	}
+	dial := func(address string) net.Conn {
+		t.Helper()
+		conn, err := net.DialTimeout("tcp", address, time.Second)
+		if err != nil {
+			t.Fatal(err)
+		}
+		t.Cleanup(func() { _ = conn.Close() })
+		exercise(t, conn, 'x')
+		return conn
+	}
+	oldSibling, oldRemoved := dial(siblingAddress), dial(removedAddress)
+	if err := apply("added", sibling, removed, added); err != nil {
+		t.Fatal(err)
+	}
+	predecessor := engine.proxy.draining
+	exercise(t, oldSibling, 'x')
+	newSibling, newRemoved := dial(siblingAddress), dial(removedAddress)
+
+	if err := apply("removed", sibling, added); err == nil || err.Error() != "previous HAProxy process is draining connections" {
+		t.Fatalf("expected next reload to wait for the predecessor, got %v", err)
+	}
+	for _, conn := range []net.Conn{oldRemoved, newRemoved} {
+		_ = conn.SetReadDeadline(time.Now().Add(time.Second))
+		if _, err := conn.Read(make([]byte, 1)); err == nil || errors.Is(err, os.ErrDeadlineExceeded) {
+			t.Fatalf("deleted rule's session was not closed: %v", err)
+		}
+	}
+	exercise(t, oldSibling, 'x')
+	exercise(t, newSibling, 'x')
+	freshSibling := dial(siblingAddress)
+	_ = freshSibling.Close()
+
+	_ = oldSibling.Close()
+	select {
+	case <-predecessor.done:
+	case <-time.After(3 * time.Second):
+		t.Fatal("idle predecessor did not exit")
+	}
+	if err := apply("removed", sibling, added); err != nil {
+		t.Fatal(err)
+	}
+	exercise(t, newSibling, 'x')
+}
